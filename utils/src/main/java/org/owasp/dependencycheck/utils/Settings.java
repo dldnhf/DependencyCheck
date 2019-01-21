@@ -336,6 +336,10 @@ public final class Settings {
          */
         public static final String ANALYZER_CMAKE_ENABLED = "analyzer.cmake.enabled";
         /**
+         * The properties key for whether the manual analyzer is enabled.
+         */
+        public static final String ANALYZER_MANUAL_ENABLED = "analyzer.manual.enabled";
+        /**
          * The properties key for whether the Ruby Bundler Audit analyzer is
          * enabled.
          */
