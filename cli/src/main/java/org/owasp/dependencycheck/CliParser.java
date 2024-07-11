@@ -17,6 +17,8 @@
  */
 package org.owasp.dependencycheck;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
 import java.io.File;
 import java.io.FileNotFoundException;
 
@@ -39,6 +41,8 @@ import org.slf4j.LoggerFactory;
  *
  * @author Jeremy Long
  */
+//suppress hard-coded password rule
+@SuppressWarnings("squid:S2068")
 public final class CliParser {
 
     /**
@@ -60,7 +64,7 @@ public final class CliParser {
     /**
      * The supported reported formats.
      */
-    private static final String SUPPORTED_FORMATS = "HTML, XML, CSV, JSON, VULN, or ALL";
+    private static final String SUPPORTED_FORMATS = "HTML, XML, CSV, JSON, JUNIT, SARIF, JENKINS, GITLAB or ALL";
 
     /**
      * Constructs a new CLI Parser object with the configured settings.
@@ -110,43 +114,60 @@ public final class CliParser {
      */
     private void validateArgs() throws FileNotFoundException, ParseException {
         if (isUpdateOnly() || isRunScan()) {
-            final String value = line.getOptionValue(ARGUMENT.CVE_VALID_FOR_HOURS);
+
+            String value = line.getOptionValue(ARGUMENT.NVD_API_VALID_FOR_HOURS);
             if (value != null) {
                 try {
                     final int i = Integer.parseInt(value);
                     if (i < 0) {
-                        throw new ParseException("Invalid Setting: cveValidForHours must be a number greater than or equal to 0.");
+                        throw new ParseException("Invalid Setting: nvdValidForHours must be a number greater than or equal to 0.");
                     }
                 } catch (NumberFormatException ex) {
-                    throw new ParseException("Invalid Setting: cveValidForHours must be a number greater than or equal to 0.");
+                    throw new ParseException("Invalid Setting: nvdValidForHours must be a number greater than or equal to 0.");
+                }
+            }
+            value = line.getOptionValue(ARGUMENT.NVD_API_MAX_RETRY_COUNT);
+            if (value != null) {
+                try {
+                    final int i = Integer.parseInt(value);
+                    if (i <= 0) {
+                        throw new ParseException("Invalid Setting: nvdMaxRetryCount must be a number greater than 0.");
+                    }
+                } catch (NumberFormatException ex) {
+                    throw new ParseException("Invalid Setting: nvdMaxRetryCount must be a number greater than 0.");
+                }
+            }
+            value = line.getOptionValue(ARGUMENT.NVD_API_DELAY);
+            if (value != null) {
+                try {
+                    final int i = Integer.parseInt(value);
+                    if (i < 0) {
+                        throw new ParseException("Invalid Setting: nvdApiDelay must be a number greater than or equal to 0.");
+                    }
+                } catch (NumberFormatException ex) {
+                    throw new ParseException("Invalid Setting: nvdApiDelay must be a number greater than or equal to 0.");
                 }
             }
         }
         if (isRunScan()) {
             validatePathExists(getScanFiles(), ARGUMENT.SCAN);
             validatePathExists(getReportDirectory(), ARGUMENT.OUT);
-            if (getPathToMono() != null) {
-                validatePathExists(getPathToMono(), ARGUMENT.PATH_TO_MONO);
-            }
-            if (!line.hasOption(ARGUMENT.APP_NAME) && !line.hasOption(ARGUMENT.PROJECT)) {
-                throw new ParseException("Missing '" + ARGUMENT.PROJECT + "' argument; the scan cannot be run without the an project name.");
+            final String pathToCore = getStringArgument(ARGUMENT.PATH_TO_CORE);
+            if (pathToCore != null) {
+                validatePathExists(pathToCore, ARGUMENT.PATH_TO_CORE);
             }
             if (line.hasOption(ARGUMENT.OUTPUT_FORMAT)) {
-                final String format = line.getOptionValue(ARGUMENT.OUTPUT_FORMAT);
-                try {
-                    Format.valueOf(format);
-                } catch (IllegalArgumentException ex) {
-                    final String msg = String.format("An invalid 'format' of '%s' was specified. "
-                            + "Supported output formats are " + SUPPORTED_FORMATS, format);
-                    throw new ParseException(msg);
+                for (String validating : getReportFormat()) {
+                    if (!isValidFormat(validating)
+                            && !isValidFilePath(validating, "format")) {
+                        final String msg = String.format("An invalid 'format' of '%s' was specified. "
+                                + "Supported output formats are %s, and custom template files.",
+                                validating, SUPPORTED_FORMATS);
+                        throw new ParseException(msg);
+                    }
                 }
             }
-            if ((getBaseCve12Url() != null || getBaseCve20Url() != null || getModifiedCve12Url() != null || getModifiedCve20Url() != null)
-                    && (getBaseCve12Url() == null || getBaseCve20Url() == null || getModifiedCve12Url() == null || getModifiedCve20Url() == null)) {
-                final String msg = "If one of the CVE URLs is specified they must all be specified; please add the missing CVE URL.";
-                throw new ParseException(msg);
-            }
-            if (line.hasOption((ARGUMENT.SYM_LINK_DEPTH))) {
+            if (line.hasOption(ARGUMENT.SYM_LINK_DEPTH)) {
                 try {
                     final int i = Integer.parseInt(line.getOptionValue(ARGUMENT.SYM_LINK_DEPTH));
                     if (i < 0) {
@@ -156,6 +177,38 @@ public final class CliParser {
                     throw new ParseException("Symbolic Link Depth (symLink) is not a number.");
                 }
             }
+        }
+    }
+
+    /**
+     * Validates the format to be one of the known Formats.
+     *
+     * @param format the format to validate
+     * @return true, if format is known in Format; false otherwise
+     * @see Format
+     */
+    private boolean isValidFormat(String format) {
+        try {
+            Format.valueOf(format);
+            return true;
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    /**
+     * Validates the path to point at an existing file.
+     *
+     * @param path the path to validate if it exists
+     * @param argumentName the argument being validated (e.g. scan, out, etc.)
+     * @return true, if path exists; false otherwise
+     */
+    private boolean isValidFilePath(String path, String argumentName) {
+        try {
+            validatePathExists(path, argumentName);
+            return true;
+        } catch (FileNotFoundException ex) {
+            return false;
         }
     }
 
@@ -192,21 +245,34 @@ public final class CliParser {
             throw new FileNotFoundException(msg);
         } else if (!path.contains("*") && !path.contains("?")) {
             File f = new File(path);
-            if ("o".equalsIgnoreCase(argumentName.substring(0, 1)) && !"ALL".equalsIgnoreCase(this.getReportFormat())) {
+            final String[] formats = this.getReportFormat();
+            if ("o".equalsIgnoreCase(argumentName.substring(0, 1)) && formats.length == 1 && !"ALL".equalsIgnoreCase(formats[0])) {
                 final String checkPath = path.toLowerCase();
-                if (checkPath.endsWith(".html") || checkPath.endsWith(".xml") || checkPath.endsWith(".htm")) {
+                if (checkPath.endsWith(".html") || checkPath.endsWith(".xml") || checkPath.endsWith(".htm")
+                        || checkPath.endsWith(".csv") || checkPath.endsWith(".json")) {
                     if (f.getParentFile() == null) {
                         f = new File(".", path);
                     }
                     if (!f.getParentFile().isDirectory()) {
                         isValid = false;
-                        final String msg = String.format("Invalid '%s' argument: '%s'", argumentName, path);
+                        final String msg = String.format("Invalid '%s' argument: '%s' - directory path does not exist", argumentName, path);
                         throw new FileNotFoundException(msg);
                     }
                 }
+            } else if ("o".equalsIgnoreCase(argumentName.substring(0, 1)) && !f.isDirectory()) {
+                if (f.getParentFile() != null && f.getParentFile().isDirectory() && !f.mkdir()) {
+                    isValid = false;
+                    final String msg = String.format("Invalid '%s' argument: '%s' - unable to create the output directory", argumentName, path);
+                    throw new FileNotFoundException(msg);
+                }
+                if (!f.isDirectory()) {
+                    isValid = false;
+                    final String msg = String.format("Invalid '%s' argument: '%s' - path does not exist", argumentName, path);
+                    throw new FileNotFoundException(msg);
+                }
             } else if (!f.exists()) {
                 isValid = false;
-                final String msg = String.format("Invalid '%s' argument: '%s'", argumentName, path);
+                final String msg = String.format("Invalid '%s' argument: '%s' - path does not exist", argumentName, path);
                 throw new FileNotFoundException(msg);
             }
 //        } else if (path.startsWith("//") || path.startsWith("\\\\")) {
@@ -241,104 +307,36 @@ public final class CliParser {
      */
     @SuppressWarnings("static-access")
     private void addStandardOptions(final Options options) {
-        final Option help = new Option(ARGUMENT.HELP_SHORT, ARGUMENT.HELP, false,
-                "Print this message.");
-
-        final Option advancedHelp = Option.builder().longOpt(ARGUMENT.ADVANCED_HELP)
-                .desc("Print the advanced help message.").build();
-
-        final Option version = new Option(ARGUMENT.VERSION_SHORT, ARGUMENT.VERSION,
-                false, "Print the version information.");
-
-        final Option noUpdate = new Option(ARGUMENT.DISABLE_AUTO_UPDATE_SHORT, ARGUMENT.DISABLE_AUTO_UPDATE,
-                false, "Disables the automatic updating of the CPE data.");
-
-        final Option projectName = Option.builder().hasArg().argName("name").longOpt(ARGUMENT.PROJECT)
-                .desc("The name of the project being scanned. This is a required argument.")
-                .build();
-
-        final Option path = Option.builder(ARGUMENT.SCAN_SHORT).argName("path").hasArg().longOpt(ARGUMENT.SCAN)
-                .desc("The path to scan - this option can be specified multiple times. Ant style"
-                        + " paths are supported (e.g. path/**/*.jar).")
-                .build();
-
-        final Option excludes = Option.builder().argName("pattern").hasArg().longOpt(ARGUMENT.EXCLUDE)
-                .desc("Specify an exclusion pattern. This option can be specified multiple times"
-                        + " and it accepts Ant style exclusions.")
-                .build();
-
-        final Option props = Option.builder(ARGUMENT.PROP_SHORT).argName("file").hasArg().longOpt(ARGUMENT.PROP)
-                .desc("A property file to load.")
-                .build();
-
-        final Option out = Option.builder(ARGUMENT.OUT_SHORT).argName("path").hasArg().longOpt(ARGUMENT.OUT)
-                .desc("The folder to write reports to. This defaults to the current directory. "
-                        + "It is possible to set this to a specific file name if the format argument is not set to ALL.")
-                .build();
-
-        final Option outputFormat = Option.builder(ARGUMENT.OUTPUT_FORMAT_SHORT).argName("format").hasArg().longOpt(ARGUMENT.OUTPUT_FORMAT)
-                .desc("The output format to write to (" + SUPPORTED_FORMATS + "). The default is HTML.")
-                .build();
-
-        final Option verboseLog = Option.builder(ARGUMENT.VERBOSE_LOG_SHORT).argName("file").hasArg().longOpt(ARGUMENT.VERBOSE_LOG)
-                .desc("The file path to write verbose logging information.")
-                .build();
-
-        final Option symLinkDepth = Option.builder().argName("depth").hasArg().longOpt(ARGUMENT.SYM_LINK_DEPTH)
-                .desc("Sets how deep nested symbolic links will be followed; 0 indicates symbolic links will not be followed.")
-                .build();
-
-        final Option suppressionFile = Option.builder().argName("file").hasArgs().longOpt(ARGUMENT.SUPPRESSION_FILES)
-                .desc("The file path to the suppression XML file. This can be specified more then once to utilize multiple "
-                        + "suppression files")
-                .build();
-
-        final Option hintsFile = Option.builder().argName("file").hasArg().longOpt(ARGUMENT.HINTS_FILE)
-                .desc("The file path to the hints XML file.")
-                .build();
-
-        final Option cveValidForHours = Option.builder().argName("hours").hasArg().longOpt(ARGUMENT.CVE_VALID_FOR_HOURS)
-                .desc("The number of hours to wait before checking for new updates from the NVD.")
-                .build();
-
-        final Option experimentalEnabled = Option.builder().longOpt(ARGUMENT.EXPERIMENTAL)
-                .desc("Enables the experimental analyzers.")
-                .build();
-
-        final Option retiredEnabled = Option.builder().longOpt(ARGUMENT.RETIRED)
-                .desc("Enables the retired analyzers.")
-                .build();
-
-        final Option failOnCVSS = Option.builder().argName("score").hasArg().longOpt(ARGUMENT.FAIL_ON_CVSS)
-                .desc("Specifies if the build should be failed if a CVSS score above a specified level is identified. "
-                        + "The default is 11; since the CVSS scores are 0-10, by default the build will never fail.")
-                .build();
-
         //This is an option group because it can be specified more then once.
-        final OptionGroup og = new OptionGroup();
-        og.addOption(path);
 
-        final OptionGroup exog = new OptionGroup();
-        exog.addOption(excludes);
-
-        options.addOptionGroup(og)
-                .addOptionGroup(exog)
-                .addOption(projectName)
-                .addOption(out)
-                .addOption(outputFormat)
-                .addOption(version)
-                .addOption(help)
-                .addOption(advancedHelp)
-                .addOption(noUpdate)
-                .addOption(symLinkDepth)
-                .addOption(props)
-                .addOption(verboseLog)
-                .addOption(suppressionFile)
-                .addOption(hintsFile)
-                .addOption(cveValidForHours)
-                .addOption(experimentalEnabled)
-                .addOption(retiredEnabled)
-                .addOption(failOnCVSS);
+        options.addOptionGroup(newOptionGroup(newOptionWithArg(ARGUMENT.SCAN_SHORT, ARGUMENT.SCAN, "path",
+                "The path to scan - this option can be specified multiple times. Ant style paths are supported (e.g. 'path/**/*.jar'); "
+                + "if using Ant style paths it is highly recommended to quote the argument value.")))
+                .addOptionGroup(newOptionGroup(newOptionWithArg(ARGUMENT.EXCLUDE, "pattern", "Specify an exclusion pattern. This option "
+                        + "can be specified multiple times and it accepts Ant style exclusions.")))
+                .addOption(newOptionWithArg(ARGUMENT.PROJECT, "name", "The name of the project being scanned."))
+                .addOption(newOptionWithArg(ARGUMENT.OUT_SHORT, ARGUMENT.OUT, "path",
+                        "The folder to write reports to. This defaults to the current directory. It is possible to set this to a specific "
+                        + "file name if the format argument is not set to ALL."))
+                .addOption(newOptionWithArg(ARGUMENT.OUTPUT_FORMAT_SHORT, ARGUMENT.OUTPUT_FORMAT, "format",
+                        "The report format (" + SUPPORTED_FORMATS + "). The default is HTML. Multiple format parameters can be specified."))
+                .addOption(newOption(ARGUMENT.PRETTY_PRINT, "When specified the JSON and XML report formats will be pretty printed."))
+                .addOption(newOption(ARGUMENT.VERSION_SHORT, ARGUMENT.VERSION, "Print the version information."))
+                .addOption(newOption(ARGUMENT.HELP_SHORT, ARGUMENT.HELP, "Print this message."))
+                .addOption(newOption(ARGUMENT.ADVANCED_HELP, "Print the advanced help message."))
+                .addOption(newOption(ARGUMENT.DISABLE_AUTO_UPDATE_SHORT, ARGUMENT.DISABLE_AUTO_UPDATE,
+                        "Disables the automatic updating of the NVD-CVE, hosted-suppressions and RetireJS data."))
+                .addOption(newOptionWithArg(ARGUMENT.VERBOSE_LOG_SHORT, ARGUMENT.VERBOSE_LOG, "file",
+                        "The file path to write verbose logging information."))
+                .addOptionGroup(newOptionGroup(newOptionWithArg(ARGUMENT.SUPPRESSION_FILES, "file",
+                        "The file path to the suppression XML file. This can be specified more then once to utilize multiple suppression files")))
+                .addOption(newOption(ARGUMENT.EXPERIMENTAL, "Enables the experimental analyzers."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_KEY, "apiKey", "The API Key to access the NVD API."))
+                .addOption(newOptionWithArg(ARGUMENT.FAIL_ON_CVSS, "score",
+                        "Specifies if the build should be failed if a CVSS score above a specified level is identified. The default is 11; "
+                        + "since the CVSS scores are 0-10, by default the build will never fail."))
+                .addOption(newOptionWithArg(ARGUMENT.FAIL_JUNIT_ON_CVSS, "score",
+                        "Specifies the CVSS score that is considered a failure when generating the junit report. The default is 0."));
     }
 
     /**
@@ -350,170 +348,175 @@ public final class CliParser {
      */
     @SuppressWarnings("static-access")
     private void addAdvancedOptions(final Options options) {
-        final Option cve12Base = Option.builder().argName("url").hasArg().longOpt(ARGUMENT.CVE_BASE_12)
-                .desc("Base URL for each year’s CVE 1.2, the %d will be replaced with the year. ").build();
-        final Option cve20Base = Option.builder().argName("url").hasArg().longOpt(ARGUMENT.CVE_BASE_20)
-                .desc("Base URL for each year’s CVE 2.0, the %d will be replaced with the year.").build();
-        final Option cve12Modified = Option.builder().argName("url").hasArg().longOpt(ARGUMENT.CVE_MOD_12)
-                .desc("URL for the modified CVE 1.2.").build();
-        final Option cve20Modified = Option.builder().argName("url").hasArg().longOpt(ARGUMENT.CVE_MOD_20)
-                .desc("URL for the modified CVE 2.0.").build();
-        final Option updateOnly = Option.builder().longOpt(ARGUMENT.UPDATE_ONLY)
-                .desc("Only update the local NVD data cache; no scan will be executed.").build();
-        final Option data = Option.builder(ARGUMENT.DATA_DIRECTORY_SHORT).argName("path").hasArg().longOpt(ARGUMENT.DATA_DIRECTORY)
-                .desc("The location of the H2 Database file. This option should generally not be set.").build();
-        final Option nexusUrl = Option.builder().argName("url").hasArg().longOpt(ARGUMENT.NEXUS_URL)
-                .desc("The url to the Nexus Server's REST API Endpoint (http://domain/nexus/service/local). "
-                        + "If not set the Nexus Analyzer will be disabled.").build();
-        final Option nexusUsername = Option.builder().argName("username").hasArg().longOpt(ARGUMENT.NEXUS_USERNAME)
-                .desc("The username to authenticate to the Nexus Server's REST API Endpoint. "
-                        + "If not set the Nexus Analyzer will use an unauthenticated connection.").build();
-        final Option nexusPassword = Option.builder().argName("password").hasArg().longOpt(ARGUMENT.NEXUS_PASSWORD)
-                .desc("The password to authenticate to the Nexus Server's REST API Endpoint. "
-                        + "If not set the Nexus Analyzer will use an unauthenticated connection.").build();
-        final Option nexusUsesProxy = Option.builder().argName("true/false").hasArg().longOpt(ARGUMENT.NEXUS_USES_PROXY)
-                .desc("Whether or not the configured proxy should be used when connecting to Nexus.").build();
-        final Option additionalZipExtensions = Option.builder().argName("extensions").hasArg()
-                .longOpt(ARGUMENT.ADDITIONAL_ZIP_EXTENSIONS)
-                .desc("A comma separated list of additional extensions to be scanned as ZIP files "
-                        + "(ZIP, EAR, WAR are already treated as zip files)").build();
-        final Option pathToMono = Option.builder().argName("path").hasArg().longOpt(ARGUMENT.PATH_TO_MONO)
-                .desc("The path to Mono for .NET Assembly analysis on non-windows systems.").build();
-        final Option pathToBundleAudit = Option.builder().argName("path").hasArg()
-                .longOpt(ARGUMENT.PATH_TO_BUNDLE_AUDIT)
-                .desc("The path to bundle-audit for Gem bundle analysis.").build();
-        final Option connectionTimeout = Option.builder(ARGUMENT.CONNECTION_TIMEOUT_SHORT).argName("timeout").hasArg()
-                .longOpt(ARGUMENT.CONNECTION_TIMEOUT).desc("The connection timeout (in milliseconds) to use when downloading resources.")
-                .build();
-        final Option proxyServer = Option.builder().argName("server").hasArg().longOpt(ARGUMENT.PROXY_SERVER)
-                .desc("The proxy server to use when downloading resources.").build();
-        final Option proxyPort = Option.builder().argName("port").hasArg().longOpt(ARGUMENT.PROXY_PORT)
-                .desc("The proxy port to use when downloading resources.").build();
-        final Option proxyUsername = Option.builder().argName("user").hasArg().longOpt(ARGUMENT.PROXY_USERNAME)
-                .desc("The proxy username to use when downloading resources.").build();
-        final Option proxyPassword = Option.builder().argName("pass").hasArg().longOpt(ARGUMENT.PROXY_PASSWORD)
-                .desc("The proxy password to use when downloading resources.").build();
-        final Option connectionString = Option.builder().argName("connStr").hasArg().longOpt(ARGUMENT.CONNECTION_STRING)
-                .desc("The connection string to the database.").build();
-        final Option dbUser = Option.builder().argName("user").hasArg().longOpt(ARGUMENT.DB_NAME)
-                .desc("The username used to connect to the database.").build();
-        final Option dbPassword = Option.builder().argName("password").hasArg().longOpt(ARGUMENT.DB_PASSWORD)
-                .desc("The password for connecting to the database.").build();
-        final Option dbDriver = Option.builder().argName("driver").hasArg().longOpt(ARGUMENT.DB_DRIVER)
-                .desc("The database driver name.").build();
-        final Option dbDriverPath = Option.builder().argName("path").hasArg().longOpt(ARGUMENT.DB_DRIVER_PATH)
-                .desc("The path to the database driver; note, this does not need to be set unless the JAR is outside of the classpath.")
-                .build();
-        final Option disableJarAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_JAR)
-                .desc("Disable the Jar Analyzer.").build();
-        final Option disableArchiveAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_ARCHIVE)
-                .desc("Disable the Archive Analyzer.").build();
-        final Option disableNuspecAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_NUSPEC)
-                .desc("Disable the Nuspec Analyzer.").build();
-        final Option disableNugetconfAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_NUGETCONF)
-                .desc("Disable the Nuget packages.config Analyzer.").build();
-        final Option disableAssemblyAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_ASSEMBLY)
-                .desc("Disable the .NET Assembly Analyzer.").build();
-        final Option disablePythonDistributionAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_PY_DIST)
-                .desc("Disable the Python Distribution Analyzer.").build();
-        final Option disablePythonPackageAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_PY_PKG)
-                .desc("Disable the Python Package Analyzer.").build();
-        final Option disableComposerAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_COMPOSER)
-                .desc("Disable the PHP Composer Analyzer.").build();
-        final Option disableAutoconfAnalyzer = Option.builder()
-                .longOpt(ARGUMENT.DISABLE_AUTOCONF).desc("Disable the Autoconf Analyzer.").build();
-        final Option disableOpenSSLAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_OPENSSL)
-                .desc("Disable the OpenSSL Analyzer.").build();
-        final Option disableCmakeAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_CMAKE)
-                .desc("Disable the Cmake Analyzer.").build();
-        final Option cocoapodsAnalyzerEnabled = Option.builder().longOpt(ARGUMENT.DISABLE_COCOAPODS)
-                .desc("Disable the CocoaPods Analyzer.").build();
-        final Option swiftPackageManagerAnalyzerEnabled = Option.builder().longOpt(ARGUMENT.DISABLE_SWIFT)
-                .desc("Disable the swift package Analyzer.").build();
-        final Option disableCentralAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_CENTRAL)
-                .desc("Disable the Central Analyzer. If this analyzer is disabled it is likely you also want to disable "
-                        + "the Nexus Analyzer.").build();
-        final Option disableNexusAnalyzer = Option.builder().longOpt(ARGUMENT.DISABLE_NEXUS)
-                .desc("Disable the Nexus Analyzer.").build();
-        final Option purge = Option.builder().longOpt(ARGUMENT.PURGE_NVD)
-                .desc("Purges the local NVD data cache").build();
-        final Option retireJsFilters = Option.builder().argName("pattern").hasArg().longOpt(ARGUMENT.RETIREJS_FILTERS)
-                .desc("Specify Retire JS content filter used to exclude files from analysis based on their content; most commonly used "
-                        + "to exclude based on your applications own copyright line. This option can be specified multiple times.")
-                .build();
-        options.addOption(updateOnly)
-                .addOption(cve12Base)
-                .addOption(cve20Base)
-                .addOption(cve12Modified)
-                .addOption(cve20Modified)
-                .addOption(proxyPort)
-                .addOption(proxyServer)
-                .addOption(proxyUsername)
-                .addOption(proxyPassword)
-                .addOption(connectionTimeout)
-                .addOption(connectionString)
-                .addOption(dbUser)
-                .addOption(data)
-                .addOption(dbPassword)
-                .addOption(dbDriver)
-                .addOption(dbDriverPath)
-                .addOption(disableJarAnalyzer)
-                .addOption(disableArchiveAnalyzer)
-                .addOption(disableAssemblyAnalyzer)
-                .addOption(pathToBundleAudit)
-                .addOption(disablePythonDistributionAnalyzer)
-                .addOption(disableCmakeAnalyzer)
-                .addOption(disablePythonPackageAnalyzer)
-                .addOption(Option.builder().longOpt(ARGUMENT.DISABLE_RUBYGEMS)
-                        .desc("Disable the Ruby Gemspec Analyzer.").build())
-                .addOption(Option.builder().longOpt(ARGUMENT.DISABLE_BUNDLE_AUDIT)
-                        .desc("Disable the Ruby Bundler-Audit Analyzer.").build())
-                .addOption(disableAutoconfAnalyzer)
-                .addOption(disableComposerAnalyzer)
-                .addOption(disableOpenSSLAnalyzer)
-                .addOption(disableNuspecAnalyzer)
-                .addOption(disableNugetconfAnalyzer)
-                .addOption(disableCentralAnalyzer)
-                .addOption(disableNexusAnalyzer)
-                .addOption(cocoapodsAnalyzerEnabled)
-                .addOption(swiftPackageManagerAnalyzerEnabled)
-                .addOption(Option.builder().longOpt(ARGUMENT.DISABLE_NODE_JS)
-                        .desc("Disable the Node.js Package Analyzer.").build())
-                .addOption(Option.builder().longOpt(ARGUMENT.DISABLE_NODE_AUDIT)
-                        .desc("Disable the Node Audit Analyzer.").build())
-                .addOption(Option.builder().longOpt(ARGUMENT.DISABLE_RETIRE_JS)
-                        .desc("Disable the RetireJS Analyzer.").build())
-                .addOption(Option.builder().longOpt(ARGUMENT.RETIREJS_FILTER_NON_VULNERABLE)
-                        .desc("Specifies that the Retire JS Analyzer should filter out non-vulnerable JS files from the report.").build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_ENABLED)
-                        .desc("Whether the Artifactory Analyzer should be enabled.").build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_PARALLEL_ANALYSIS)
-                        .desc("Whether the Artifactory Analyzer should use parallel analysis.")
-                        .argName("true/false").hasArg(true).build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_USES_PROXY)
-                        .desc("Whether the Artifactory Analyzer should use the proxy.")
-                        .argName("true/false").hasArg(true).build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_USERNAME)
-                        .desc("The Artifactory username for authentication.")
-                        .argName("username").hasArg(true).build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_API_TOKEN)
-                        .desc("The Artifactory API token.")
-                        .argName("token").hasArg(true).build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_BEARER_TOKEN)
-                        .desc("The Artifactory bearer token.")
-                        .argName("token").hasArg(true).build())
-                .addOption(Option.builder().longOpt(ARGUMENT.ARTIFACTORY_URL)
-                        .desc("The Artifactory URL.")
-                        .argName("url").hasArg(true).build())
-                .addOption(retireJsFilters)
-                .addOption(nexusUrl)
-                .addOption(nexusUsername)
-                .addOption(nexusPassword)
-                .addOption(nexusUsesProxy)
-                .addOption(additionalZipExtensions)
-                .addOption(pathToMono)
-                .addOption(pathToBundleAudit)
-                .addOption(purge);
+        options
+                .addOption(newOption(ARGUMENT.UPDATE_ONLY,
+                        "Only update the local NVD data cache; no scan will be executed."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_DELAY, "milliseconds",
+                        "Time in milliseconds to wait between downloading from the NVD."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_ENDPOINT, "endpoint",
+                        "The NVD API Endpoint - setting this is rare."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_DATAFEED_URL, "url",
+                        "The URL to the NVD API Datafeed."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_DATAFEED_USER, "user",
+                        "Credentials for basic authentication to the NVD API Datafeed."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_DATAFEED_PASSWORD, "password",
+                        "Credentials for basic authentication to the NVD API Datafeed."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_MAX_RETRY_COUNT,"count",
+                        "The maximum number of retry requests for a single call to the NVD API."))
+                .addOption(newOptionWithArg(ARGUMENT.NVD_API_VALID_FOR_HOURS, "hours",
+                        "The number of hours to wait before checking for new updates from the NVD."))
+                .addOption(newOptionWithArg(ARGUMENT.PROXY_PORT, "port",
+                        "The proxy port to use when downloading resources."))
+                .addOption(newOptionWithArg(ARGUMENT.PROXY_SERVER, "server",
+                        "The proxy server to use when downloading resources."))
+                .addOption(newOptionWithArg(ARGUMENT.PROXY_USERNAME, "user",
+                        "The proxy username to use when downloading resources."))
+                .addOption(newOptionWithArg(ARGUMENT.PROXY_PASSWORD, "pass",
+                        "The proxy password to use when downloading resources."))
+                .addOption(newOptionWithArg(ARGUMENT.NON_PROXY_HOSTS, "list",
+                        "The proxy exclusion list: hostnames (or patterns) for which proxy should not be used. "
+                        + "Use pipe, comma or colon as list separator."))
+                .addOption(newOptionWithArg(ARGUMENT.CONNECTION_TIMEOUT_SHORT, ARGUMENT.CONNECTION_TIMEOUT, "timeout",
+                        "The connection timeout (in milliseconds) to use when downloading resources."))
+                .addOption(newOptionWithArg(ARGUMENT.CONNECTION_READ_TIMEOUT, "timeout",
+                        "The read timeout (in milliseconds) to use when downloading resources."))
+                .addOption(newOptionWithArg(ARGUMENT.CONNECTION_STRING, "connStr",
+                        "The connection string to the database."))
+                .addOption(newOptionWithArg(ARGUMENT.DB_NAME, "user",
+                        "The username used to connect to the database."))
+                .addOption(newOptionWithArg(ARGUMENT.DATA_DIRECTORY_SHORT, ARGUMENT.DATA_DIRECTORY, "path",
+                        "The location of the H2 Database file. This option should generally not be set."))
+                .addOption(newOptionWithArg(ARGUMENT.DB_PASSWORD, "password",
+                        "The password for connecting to the database."))
+                .addOption(newOptionWithArg(ARGUMENT.DB_DRIVER, "driver",
+                        "The database driver name."))
+                .addOption(newOptionWithArg(ARGUMENT.DB_DRIVER_PATH, "path",
+                        "The path to the database driver; note, this does not need to be set unless the JAR is "
+                        + "outside of the classpath."))
+                .addOption(newOptionWithArg(ARGUMENT.SYM_LINK_DEPTH, "depth",
+                        "Sets how deep nested symbolic links will be followed; 0 indicates symbolic links will not be followed."))
+                .addOption(newOptionWithArg(ARGUMENT.PATH_TO_BUNDLE_AUDIT, "path",
+                        "The path to bundle-audit for Gem bundle analysis."))
+                .addOption(newOptionWithArg(ARGUMENT.PATH_TO_BUNDLE_AUDIT_WORKING_DIRECTORY, "path",
+                        "The path to working directory that the bundle-audit command should be executed from when "
+                        + "doing Gem bundle analysis."))
+                .addOption(newOptionWithArg(ARGUMENT.CENTRAL_URL, "url",
+                        "Alternative URL for Maven Central Search. If not set the public Sonatype Maven Central will be used."))
+                .addOption(newOptionWithArg(ARGUMENT.OSSINDEX_URL, "url",
+                        "Alternative URL for the OSS Index. If not set the public Sonatype OSS Index will be used."))
+                .addOption(newOptionWithArg(ARGUMENT.OSSINDEX_USERNAME, "username",
+                        "The username to authenticate to Sonatype's OSS Index. If not set the Sonatype OSS Index "
+                        + "Analyzer will use an unauthenticated connection."))
+                .addOption(newOptionWithArg(ARGUMENT.OSSINDEX_PASSWORD, "password", ""
+                        + "The password to authenticate to Sonatype's OSS Index. If not set the Sonatype OSS "
+                        + "Index Analyzer will use an unauthenticated connection."))
+                .addOption(newOptionWithArg(ARGUMENT.OSSINDEX_WARN_ONLY_ON_REMOTE_ERRORS, "true/false", ""
+                        + "Whether a Sonatype OSS Index remote error should result in a warning only or a failure."))
+                .addOption(newOption(ARGUMENT.RETIRE_JS_FORCEUPDATE, "Force the RetireJS Analyzer to update "
+                        + "even if autoupdate is disabled"))
+                .addOption(newOptionWithArg(ARGUMENT.RETIREJS_URL, "url",
+                        "The Retire JS Repository URL"))
+                .addOption(newOptionWithArg(ARGUMENT.RETIREJS_URL_USER, "username",
+                        "The password to authenticate to Retire JS Repository URL"))
+                .addOption(newOptionWithArg(ARGUMENT.RETIREJS_URL_PASSWORD, "password",
+                        "The password to authenticate to Retire JS Repository URL"))
+                .addOption(newOption(ARGUMENT.RETIREJS_FILTER_NON_VULNERABLE, "Specifies that the Retire JS "
+                        + "Analyzer should filter out non-vulnerable JS files from the report."))
+                .addOption(newOptionWithArg(ARGUMENT.ARTIFACTORY_PARALLEL_ANALYSIS, "true/false",
+                        "Whether the Artifactory Analyzer should use parallel analysis."))
+                .addOption(newOptionWithArg(ARGUMENT.ARTIFACTORY_USES_PROXY, "true/false",
+                        "Whether the Artifactory Analyzer should use the proxy."))
+                .addOption(newOptionWithArg(ARGUMENT.ARTIFACTORY_USERNAME, "username",
+                        "The Artifactory username for authentication."))
+                .addOption(newOptionWithArg(ARGUMENT.ARTIFACTORY_API_TOKEN, "token",
+                        "The Artifactory API token."))
+                .addOption(newOptionWithArg(ARGUMENT.ARTIFACTORY_BEARER_TOKEN, "token",
+                        "The Artifactory bearer token."))
+                .addOption(newOptionWithArg(ARGUMENT.ARTIFACTORY_URL, "url",
+                        "The Artifactory URL."))
+                .addOption(newOptionWithArg(ARGUMENT.PATH_TO_GO, "path",
+                        "The path to the `go` executable."))
+                .addOption(newOptionWithArg(ARGUMENT.PATH_TO_YARN, "path",
+                        "The path to the `yarn` executable."))
+                .addOption(newOptionWithArg(ARGUMENT.PATH_TO_PNPM, "path",
+                        "The path to the `pnpm` executable."))
+                .addOption(newOptionWithArg(ARGUMENT.RETIREJS_FILTERS, "pattern",
+                        "Specify Retire JS content filter used to exclude files from analysis based on their content; "
+                        + "most commonly used to exclude based on your applications own copyright line. This "
+                        + "option can be specified multiple times."))
+                .addOption(newOptionWithArg(ARGUMENT.NEXUS_URL, "url",
+                        "The url to the Nexus Server's REST API Endpoint (http://domain/nexus/service/local). If not "
+                        + "set the Nexus Analyzer will be disabled."))
+                .addOption(newOptionWithArg(ARGUMENT.NEXUS_USERNAME, "username",
+                        "The username to authenticate to the Nexus Server's REST API Endpoint. If not set the Nexus "
+                        + "Analyzer will use an unauthenticated connection."))
+                .addOption(newOptionWithArg(ARGUMENT.NEXUS_PASSWORD, "password",
+                        "The password to authenticate to the Nexus Server's REST API Endpoint. If not set the Nexus "
+                        + "Analyzer will use an unauthenticated connection."))
+                //TODO remove as this should be covered by non-proxy hosts
+                .addOption(newOptionWithArg(ARGUMENT.NEXUS_USES_PROXY, "true/false",
+                        "Whether or not the configured proxy should be used when connecting to Nexus."))
+                .addOption(newOptionWithArg(ARGUMENT.ADDITIONAL_ZIP_EXTENSIONS, "extensions",
+                        "A comma separated list of additional extensions to be scanned as ZIP files (ZIP, EAR, WAR "
+                        + "are already treated as zip files)"))
+                .addOption(newOptionWithArg(ARGUMENT.PROP_SHORT, ARGUMENT.PROP, "file", "A property file to load."))
+                .addOption(newOptionWithArg(ARGUMENT.PATH_TO_CORE, "path", "The path to dotnet core."))
+                .addOption(newOptionWithArg(ARGUMENT.HINTS_FILE, "file", "The file path to the hints XML file."))
+                .addOption(newOption(ARGUMENT.RETIRED, "Enables the retired analyzers."))
+                .addOption(newOption(ARGUMENT.DISABLE_MSBUILD, "Disable the MS Build Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_JAR, "Disable the Jar Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_ARCHIVE, "Disable the Archive Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_KEV, "Disable the Known Exploited Vulnerability Analyzer."))
+                .addOption(newOptionWithArg(ARGUMENT.KEV_URL, "url", "The url to the CISA Known Exploited Vulnerabilities JSON data feed"))
+                .addOption(newOption(ARGUMENT.DISABLE_ASSEMBLY, "Disable the .NET Assembly Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_PY_DIST, "Disable the Python Distribution Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_CMAKE, "Disable the Cmake Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_PY_PKG, "Disable the Python Package Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_MIX_AUDIT, "Disable the Elixir mix_audit Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_RUBYGEMS, "Disable the Ruby Gemspec Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_BUNDLE_AUDIT, "Disable the Ruby Bundler-Audit Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_FILENAME, "Disable the File Name Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_AUTOCONF, "Disable the Autoconf Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_MAVEN_INSTALL, "Disable the Maven install Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_PIP, "Disable the pip Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_PIPFILE, "Disable the Pipfile Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_COMPOSER, "Disable the PHP Composer Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_CPAN, "Disable the Perl CPAN file Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_POETRY, "Disable the Poetry Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_GOLANG_MOD, "Disable the Golang Mod Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_DART, "Disable the Dart Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_OPENSSL, "Disable the OpenSSL Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_NUSPEC, "Disable the Nuspec Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_NUGETCONF, "Disable the Nuget packages.config Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_CENTRAL, "Disable the Central Analyzer. If this analyzer "
+                        + "is disabled it is likely you also want to disable the Nexus Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_CENTRAL_CACHE, "Disallow the Central Analyzer from caching results"))
+                .addOption(newOption(ARGUMENT.DISABLE_OSSINDEX, "Disable the Sonatype OSS Index Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_OSSINDEX_CACHE, "Disallow the OSS Index Analyzer from caching results"))
+                .addOption(newOption(ARGUMENT.DISABLE_COCOAPODS, "Disable the CocoaPods Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_CARTHAGE, "Disable the Carthage Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_SWIFT, "Disable the swift package Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_SWIFT_RESOLVED, "Disable the swift package resolved Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_GO_DEP, "Disable the Golang Package Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_NODE_JS, "Disable the Node.js Package Analyzer."))
+                .addOption(newOption(ARGUMENT.NODE_PACKAGE_SKIP_DEV_DEPENDENCIES, "Configures the Node Package Analyzer to skip devDependencies"))
+                .addOption(newOption(ARGUMENT.DISABLE_NODE_AUDIT, "Disable the Node Audit Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_PNPM_AUDIT, "Disable the Pnpm Audit Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_YARN_AUDIT, "Disable the Yarn Audit Analyzer."))
+                .addOption(newOption(ARGUMENT.DISABLE_NODE_AUDIT_CACHE, "Disallow the Node Audit Analyzer from caching results"))
+                .addOption(newOption(ARGUMENT.DISABLE_NODE_AUDIT_SKIPDEV, "Configures the Node Audit Analyzer to skip devDependencies"))
+                .addOption(newOption(ARGUMENT.DISABLE_RETIRE_JS, "Disable the RetireJS Analyzer."))
+                .addOption(newOption(ARGUMENT.ENABLE_NEXUS, "Enable the Nexus Analyzer."))
+                .addOption(newOption(ARGUMENT.ARTIFACTORY_ENABLED, "Whether the Artifactory Analyzer should be enabled."))
+                .addOption(newOption(ARGUMENT.PURGE_NVD, "Purges the local NVD data cache"))
+                .addOption(newOption(ARGUMENT.DISABLE_HOSTED_SUPPRESSIONS, "Disable the usage of the hosted suppressions file"))
+                .addOption(newOption(ARGUMENT.HOSTED_SUPPRESSIONS_FORCEUPDATE, "Force the hosted suppressions file to update even"
+                        + " if autoupdate is disabled"))
+                .addOption(newOptionWithArg(ARGUMENT.HOSTED_SUPPRESSIONS_VALID_FOR_HOURS, "hours",
+                        "The number of hours to wait before checking for new updates of the the hosted suppressions file."))
+                .addOption(newOptionWithArg(ARGUMENT.HOSTED_SUPPRESSIONS_URL, "url",
+                        "The URL for a mirrored hosted suppressions file"));
+
     }
 
     /**
@@ -526,18 +529,9 @@ public final class CliParser {
      */
     @SuppressWarnings({"static-access", "deprecation"})
     private void addDeprecatedOptions(final Options options) {
-
-        final Option proxyServer = Option.builder().argName("url").hasArg().longOpt(ARGUMENT.PROXY_URL)
-                .desc("The proxy url argument is deprecated, use proxyserver instead.")
-                .build();
-        final Option appName = Option.builder(ARGUMENT.APP_NAME_SHORT).argName("name").hasArg().longOpt(ARGUMENT.APP_NAME)
-                .desc("The name of the project being scanned.")
-                .build();
-
-        options.addOption(Option.builder().longOpt("disableNSP")
-                        .desc("Disable the NSP Package Analyzer.").build());
-        options.addOption(proxyServer);
-        options.addOption(appName);
+        //not a real option - but enables java debugging via the shell script
+        options.addOption(newOption("debug",
+                "Used to enable java debugging of the cli via dependency-check.sh."));
     }
 
     /**
@@ -590,17 +584,17 @@ public final class CliParser {
      * Utility method to determine if one of the disable options has been set.
      * If not set, this method will check the currently configured settings for
      * the current value to return.
-     *
+     * <p>
      * Example given `--disableArchive` on the command line would cause this
      * method to return true for the disable archive setting.
      *
-     * @param argument the command line argument
+     * @param disableFlag the command line disable option
      * @param setting the corresponding settings key
      * @return true if the disable option was set, if not set the currently
      * configured value will be returned
      */
-    private boolean hasDisableOption(String argument, String setting) {
-        if (line == null || !line.hasOption(argument)) {
+    public boolean isDisabled(String disableFlag, String setting) {
+        if (line == null || !line.hasOption(disableFlag)) {
             try {
                 return !settings.getBoolean(setting);
             } catch (InvalidSettingException ise) {
@@ -613,245 +607,33 @@ public final class CliParser {
     }
 
     /**
-     * Returns true if the disableJar command line argument was specified.
-     *
-     * @return true if the disableJar command line argument was specified;
-     * otherwise false
-     */
-    public boolean isJarDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_JAR, Settings.KEYS.ANALYZER_JAR_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableArchive command line argument was specified.
-     *
-     * @return true if the disableArchive command line argument was specified;
-     * otherwise false
-     */
-    public boolean isArchiveDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_ARCHIVE, Settings.KEYS.ANALYZER_ARCHIVE_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableNuspec command line argument was specified.
-     *
-     * @return true if the disableNuspec command line argument was specified;
-     * otherwise false
-     */
-    public boolean isNuspecDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_NUSPEC, Settings.KEYS.ANALYZER_NUSPEC_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableNugetconf command line argument was specified.
-     *
-     * @return true if the disableNugetconf command line argument was specified;
-     * otherwise false
-     */
-    public boolean isNugetconfDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_NUGETCONF, Settings.KEYS.ANALYZER_NUGETCONF_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableAssembly command line argument was specified.
-     *
-     * @return true if the disableAssembly command line argument was specified;
-     * otherwise false
-     */
-    public boolean isAssemblyDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_ASSEMBLY, Settings.KEYS.ANALYZER_ASSEMBLY_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableBundleAudit command line argument was
-     * specified.
-     *
-     * @return true if the disableBundleAudit command line argument was
-     * specified; otherwise false
-     */
-    public boolean isBundleAuditDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_BUNDLE_AUDIT, Settings.KEYS.ANALYZER_BUNDLE_AUDIT_ENABLED);
-    }
-
-    /**
-     * Returns true if the disablePyDist command line argument was specified.
-     *
-     * @return true if the disablePyDist command line argument was specified;
-     * otherwise false
-     */
-    public boolean isPythonDistributionDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_PY_DIST, Settings.KEYS.ANALYZER_PYTHON_DISTRIBUTION_ENABLED);
-    }
-
-    /**
-     * Returns true if the disablePyPkg command line argument was specified.
-     *
-     * @return true if the disablePyPkg command line argument was specified;
-     * otherwise false
-     */
-    public boolean isPythonPackageDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_PY_PKG, Settings.KEYS.ANALYZER_PYTHON_PACKAGE_ENABLED);
-    }
-
-    /**
-     * Returns whether the Ruby gemspec analyzer is disabled.
-     *
-     * @return true if the {@link ARGUMENT#DISABLE_RUBYGEMS} command line
-     * argument was specified; otherwise false
-     */
-    public boolean isRubyGemspecDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_RUBYGEMS, Settings.KEYS.ANALYZER_RUBY_GEMSPEC_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableCmake command line argument was specified.
-     *
-     * @return true if the disableCmake command line argument was specified;
-     * otherwise false
-     */
-    public boolean isCmakeDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_CMAKE, Settings.KEYS.ANALYZER_CMAKE_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableAutoconf command line argument was specified.
-     *
-     * @return true if the disableAutoconf command line argument was specified;
-     * otherwise false
-     */
-    public boolean isAutoconfDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_AUTOCONF, Settings.KEYS.ANALYZER_AUTOCONF_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableComposer command line argument was specified.
-     *
-     * @return true if the disableComposer command line argument was specified;
-     * otherwise false
-     */
-    public boolean isComposerDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_COMPOSER, Settings.KEYS.ANALYZER_COMPOSER_LOCK_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableNexus command line argument was specified.
-     *
-     * @return true if the disableNexus command line argument was specified;
-     * otherwise false
-     */
-    public boolean isNexusDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_NEXUS, Settings.KEYS.ANALYZER_NEXUS_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableOpenSSL command line argument was specified.
-     *
-     * @return true if the disableOpenSSL command line argument was specified;
-     * otherwise false
-     */
-    public boolean isOpenSSLDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_OPENSSL, Settings.KEYS.ANALYZER_OPENSSL_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableNodeJS command line argument was specified.
-     *
-     * @return true if the disableNodeJS command line argument was specified;
-     * otherwise false
-     */
-    public boolean isNodeJsDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_NODE_JS, Settings.KEYS.ANALYZER_NODE_PACKAGE_ENABLED);
-    }
-
-    /**
      * Returns true if the disableNodeAudit command line argument was specified.
      *
      * @return true if the disableNodeAudit command line argument was specified;
      * otherwise false
      */
     public boolean isNodeAuditDisabled() {
-        if (hasDisableOption("disableNSP", Settings.KEYS.ANALYZER_NODE_AUDIT_ENABLED)) {
-            LOGGER.error("The disableNSP argument has been deprecated and replaced by disableNodeAudit");
-            LOGGER.error("The disableNSP argument will be removed in the next version");
-            return true;
-        }
-        return hasDisableOption(ARGUMENT.DISABLE_NODE_AUDIT, Settings.KEYS.ANALYZER_NODE_AUDIT_ENABLED);
+        return isDisabled(ARGUMENT.DISABLE_NODE_AUDIT, Settings.KEYS.ANALYZER_NODE_AUDIT_ENABLED);
     }
 
     /**
-     * Returns true if the disableRetireJS command line argument was specified.
+     * Returns true if the disableYarnAudit command line argument was specified.
      *
-     * @return true if the disableRetireJS command line argument was specified;
+     * @return true if the disableYarnAudit command line argument was specified;
      * otherwise false
      */
-    public boolean isRetireJSDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_RETIRE_JS, Settings.KEYS.ANALYZER_RETIREJS_ENABLED);
+    public boolean isYarnAuditDisabled() {
+        return isDisabled(ARGUMENT.DISABLE_YARN_AUDIT, Settings.KEYS.ANALYZER_YARN_AUDIT_ENABLED);
     }
 
     /**
-     * Returns true if the disableCocoapodsAnalyzer command line argument was
-     * specified.
+     * Returns true if the disablePnpmAudit command line argument was specified.
      *
-     * @return true if the disableCocoapodsAnalyzer command line argument was
-     * specified; otherwise false
-     */
-    public boolean isCocoapodsAnalyzerDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_COCOAPODS, Settings.KEYS.ANALYZER_COCOAPODS_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableSwiftPackageManagerAnalyzer command line
-     * argument was specified.
-     *
-     * @return true if the disableSwiftPackageManagerAnalyzer command line
-     * argument was specified; otherwise false
-     */
-    public boolean isSwiftPackageAnalyzerDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_SWIFT, Settings.KEYS.ANALYZER_SWIFT_PACKAGE_MANAGER_ENABLED);
-    }
-
-    /**
-     * Returns true if the disableCentral command line argument was specified.
-     *
-     * @return true if the disableCentral command line argument was specified;
+     * @return true if the disablePnpmAudit command line argument was specified;
      * otherwise false
      */
-    public boolean isCentralDisabled() {
-        return hasDisableOption(ARGUMENT.DISABLE_CENTRAL, Settings.KEYS.ANALYZER_CENTRAL_ENABLED);
-    }
-
-    /**
-     * Returns the url to the nexus server if one was specified.
-     *
-     * @return the url to the nexus server; if none was specified this will
-     * return null;
-     */
-    public String getNexusUrl() {
-        if (line == null || !line.hasOption(ARGUMENT.NEXUS_URL)) {
-            return null;
-        } else {
-            return line.getOptionValue(ARGUMENT.NEXUS_URL);
-        }
-    }
-
-    /**
-     * Returns the username to authenticate to the nexus server if one was specified.
-     *
-     * @return the username to authenticate to the nexus server; if none was specified this will
-     * return null;
-     */
-    public String getNexusUsername() {
-        return line.getOptionValue(ARGUMENT.NEXUS_USERNAME);
-    }
-
-    /**
-     * Returns the password to authenticate to the nexus server if one was specified.
-     *
-     * @return the password to authenticate to the nexus server; if none was specified this will
-     * return null;
-     */
-    public String getNexusPassword() {
-        return line.getOptionValue(ARGUMENT.NEXUS_PASSWORD);
+    public boolean isPnpmAuditDisabled() {
+        return isDisabled(ARGUMENT.DISABLE_PNPM_AUDIT, Settings.KEYS.ANALYZER_PNPM_AUDIT_ENABLED);
     }
 
     /**
@@ -876,21 +658,13 @@ public final class CliParser {
     }
 
     /**
-     * Returns whether or not the argument exists.
-     *
-     * @param argument the argument
-     * @return whether or not the argument exists
-     */
-    public boolean hasArgument(String argument) {
-        return line != null && line.hasOption(argument);
-    }
-
-    /**
      * Returns the argument boolean value.
      *
      * @param argument the argument
      * @return the argument boolean value
      */
+    @SuppressFBWarnings(justification = "Accepting that this is a bad practice - used a Boolean as we needed three states",
+            value = {"NP_BOOLEAN_RETURN_NULL"})
     public Boolean getBooleanArgument(String argument) {
         if (line != null && line.hasOption(argument)) {
             final String value = line.getOptionValue(argument);
@@ -902,14 +676,58 @@ public final class CliParser {
     }
 
     /**
-     * Returns the argument value.
+     * Returns the argument value for the given option.
      *
-     * @param argument the argument
+     * @param option the option
      * @return the value of the argument
      */
-    public String getStringArgument(String argument) {
-        if (line != null && line.hasOption(argument)) {
-            return line.getOptionValue(argument);
+    public String getStringArgument(String option) {
+        return getStringArgument(option, null);
+    }
+
+    /**
+     * Returns the argument value for the given option.
+     *
+     * @param option the option
+     * @param key the dependency-check settings key for the option.
+     * @return the value of the argument
+     */
+    public String getStringArgument(String option, String key) {
+        if (line != null && line.hasOption(option)) {
+            if (key != null && (option.toLowerCase().endsWith("password")
+                    || option.toLowerCase().endsWith("pass"))) {
+                LOGGER.warn("{} used on the command line, consider moving the password "
+                        + "to a properties file using the key `{}` and using the "
+                        + "--propertyfile argument instead", option, key);
+            }
+            return line.getOptionValue(option);
+        }
+        return null;
+    }
+
+    /**
+     * Returns the argument value for the given option.
+     *
+     * @param option the option
+     * @return the value of the argument
+     */
+    public String[] getStringArguments(String option) {
+        if (line != null && line.hasOption(option)) {
+            return line.getOptionValues(option);
+        }
+        return null;
+    }
+
+    /**
+     * Returns the argument value for the given option.
+     *
+     * @param option the option
+     * @return the value of the argument
+     */
+    public File getFileArgument(String option) {
+        final String path = line.getOptionValue(option);
+        if (path != null) {
+            return new File(path);
         }
         return null;
     }
@@ -927,10 +745,10 @@ public final class CliParser {
         final String helpMsg = String.format("%n%s"
                 + " can be used to identify if there are any known CVE vulnerabilities in libraries utilized by an application. "
                 + "%s will automatically update required data from the Internet, such as the CVE and CPE data files from nvd.nist.gov.%n%n",
-                settings.getString("application.name", "DependencyCheck"),
-                settings.getString("application.name", "DependencyCheck"));
+                settings.getString(Settings.KEYS.APPLICATION_NAME, "DependencyCheck"),
+                settings.getString(Settings.KEYS.APPLICATION_NAME, "DependencyCheck"));
 
-        formatter.printHelp(settings.getString("application.name", "DependencyCheck"),
+        formatter.printHelp(settings.getString(Settings.KEYS.APPLICATION_NAME, "DependencyCheck"),
                 helpMsg,
                 options,
                 "",
@@ -974,6 +792,8 @@ public final class CliParser {
      * @return <code>true</code> if non-vulnerable JS should be filtered in the
      * RetireJS Analyzer; otherwise <code>null</code>
      */
+    @SuppressFBWarnings(justification = "Accepting that this is a bad practice - but made more sense in this use case",
+            value = {"NP_BOOLEAN_RETURN_NULL"})
     public Boolean isRetireJsFilterNonVulnerable() {
         return (line != null && line.hasOption(ARGUMENT.RETIREJS_FILTER_NON_VULNERABLE)) ? true : null;
     }
@@ -989,32 +809,16 @@ public final class CliParser {
     }
 
     /**
-     * Returns the path to Mono for .NET Assembly analysis on non-windows
-     * systems.
-     *
-     * @return the path to Mono
-     */
-    public String getPathToMono() {
-        return line.getOptionValue(ARGUMENT.PATH_TO_MONO);
-    }
-
-    /**
-     * Returns the path to bundle-audit for Ruby bundle analysis.
-     *
-     * @return the path to Mono
-     */
-    public String getPathToBundleAudit() {
-        return line.getOptionValue(ARGUMENT.PATH_TO_BUNDLE_AUDIT);
-    }
-
-    /**
      * Returns the output format specified on the command line. Defaults to HTML
      * if no format was specified.
      *
      * @return the output format name.
      */
-    public String getReportFormat() {
-        return line.getOptionValue(ARGUMENT.OUTPUT_FORMAT, "HTML");
+    public String[] getReportFormat() {
+        if (line.hasOption(ARGUMENT.OUTPUT_FORMAT)) {
+            return line.getOptionValues(ARGUMENT.OUTPUT_FORMAT);
+        }
+        return new String[]{"HTML"};
     }
 
     /**
@@ -1023,152 +827,11 @@ public final class CliParser {
      * @return the application name.
      */
     public String getProjectName() {
-        final String appName = line.getOptionValue(ARGUMENT.APP_NAME);
         String name = line.getOptionValue(ARGUMENT.PROJECT);
-        if (name == null && appName != null) {
-            name = appName;
-            LOGGER.warn("The '{}' argument should no longer be used; use '{}' instead.", ARGUMENT.APP_NAME, ARGUMENT.PROJECT);
+        if (name == null) {
+            name = "";
         }
         return name;
-    }
-
-    /**
-     * Returns the base URL for the CVE 1.2 XMl file.
-     *
-     * @return the URL to the CVE 1.2 XML file.
-     */
-    public String getBaseCve12Url() {
-        return line.getOptionValue(ARGUMENT.CVE_BASE_12);
-    }
-
-    /**
-     * Returns the base URL for the CVE 2.0 XMl file.
-     *
-     * @return the URL to the CVE 2.0 XML file.
-     */
-    public String getBaseCve20Url() {
-        return line.getOptionValue(ARGUMENT.CVE_BASE_20);
-    }
-
-    /**
-     * Returns the URL for the modified CVE 1.2 XMl file.
-     *
-     * @return the URL to the modified CVE 1.2 XML file.
-     */
-    public String getModifiedCve12Url() {
-        return line.getOptionValue(ARGUMENT.CVE_MOD_12);
-    }
-
-    /**
-     * Returns the URL for the modified CVE 2.0 XMl file.
-     *
-     * @return the URL to the modified CVE 2.0 XML file.
-     */
-    public String getModifiedCve20Url() {
-        return line.getOptionValue(ARGUMENT.CVE_MOD_20);
-    }
-
-    /**
-     * Returns the connection timeout.
-     *
-     * @return the connection timeout
-     */
-    public String getConnectionTimeout() {
-        return line.getOptionValue(ARGUMENT.CONNECTION_TIMEOUT);
-    }
-
-    /**
-     * Returns the proxy server.
-     *
-     * @return the proxy server
-     */
-    @SuppressWarnings("deprecation")
-    public String getProxyServer() {
-
-        String server = line.getOptionValue(ARGUMENT.PROXY_SERVER);
-        if (server == null) {
-            server = line.getOptionValue(ARGUMENT.PROXY_URL);
-            if (server != null) {
-                LOGGER.warn("An old command line argument 'proxyurl' was detected; use proxyserver instead");
-            }
-        }
-        return server;
-    }
-
-    /**
-     * Returns the proxy port.
-     *
-     * @return the proxy port
-     */
-    public String getProxyPort() {
-        return line.getOptionValue(ARGUMENT.PROXY_PORT);
-    }
-
-    /**
-     * Returns the proxy username.
-     *
-     * @return the proxy username
-     */
-    public String getProxyUsername() {
-        return line.getOptionValue(ARGUMENT.PROXY_USERNAME);
-    }
-
-    /**
-     * Returns the proxy password.
-     *
-     * @return the proxy password
-     */
-    public String getProxyPassword() {
-        return line.getOptionValue(ARGUMENT.PROXY_PASSWORD);
-    }
-
-    /**
-     * Get the value of dataDirectory.
-     *
-     * @return the value of dataDirectory
-     */
-    public String getDataDirectory() {
-        return line.getOptionValue(ARGUMENT.DATA_DIRECTORY);
-    }
-
-    /**
-     * Returns the properties file specified on the command line.
-     *
-     * @return the properties file specified on the command line
-     */
-    public File getPropertiesFile() {
-        final String path = line.getOptionValue(ARGUMENT.PROP);
-        if (path != null) {
-            return new File(path);
-        }
-        return null;
-    }
-
-    /**
-     * Returns the path to the verbose log file.
-     *
-     * @return the path to the verbose log file
-     */
-    public String getVerboseLog() {
-        return line.getOptionValue(ARGUMENT.VERBOSE_LOG);
-    }
-
-    /**
-     * Returns the paths to the suppression files.
-     *
-     * @return the paths to the suppression files.
-     */
-    public String[] getSuppressionFiles() {
-        return line.getOptionValues(ARGUMENT.SUPPRESSION_FILES);
-    }
-
-    /**
-     * Returns the path to the hints file.
-     *
-     * @return the path to the hints file
-     */
-    public String getHintsFile() {
-        return line.getOptionValue(ARGUMENT.HINTS_FILE);
     }
 
     /**
@@ -1182,17 +845,6 @@ public final class CliParser {
                 settings.getString(Settings.KEYS.APPLICATION_NAME, "dependency-check"),
                 settings.getString(Settings.KEYS.APPLICATION_VERSION, "Unknown"));
         System.out.println(version);
-    }
-
-    /**
-     * Checks if the auto update feature has been disabled. If it has been
-     * disabled via the command line this will return false.
-     *
-     * @return <code>true</code> if auto-update is allowed; otherwise
-     * <code>null</code>
-     */
-    public Boolean isAutoUpdate() {
-        return (line != null && line.hasOption(ARGUMENT.DISABLE_AUTO_UPDATE)) ? false : null;
     }
 
     /**
@@ -1226,65 +878,13 @@ public final class CliParser {
     }
 
     /**
-     * Returns the database driver path if specified; otherwise null is
-     * returned.
+     * Returns the argument value.
      *
-     * @return the database driver name if specified; otherwise null is returned
+     * @param argument the argument
+     * @return the value of the argument
      */
-    public String getDatabaseDriverPath() {
-        return line.getOptionValue(ARGUMENT.DB_DRIVER_PATH);
-    }
-
-    /**
-     * Returns the database connection string if specified; otherwise null is
-     * returned.
-     *
-     * @return the database connection string if specified; otherwise null is
-     * returned
-     */
-    public String getConnectionString() {
-        return line.getOptionValue(ARGUMENT.CONNECTION_STRING);
-    }
-
-    /**
-     * Returns the database database user name if specified; otherwise null is
-     * returned.
-     *
-     * @return the database database user name if specified; otherwise null is
-     * returned
-     */
-    public String getDatabaseUser() {
-        return line.getOptionValue(ARGUMENT.DB_NAME);
-    }
-
-    /**
-     * Returns the database database password if specified; otherwise null is
-     * returned.
-     *
-     * @return the database database password if specified; otherwise null is
-     * returned
-     */
-    public String getDatabasePassword() {
-        return line.getOptionValue(ARGUMENT.DB_PASSWORD);
-    }
-
-    /**
-     * Returns the additional Extensions if specified; otherwise null is
-     * returned.
-     *
-     * @return the additional Extensions; otherwise null is returned
-     */
-    public String getAdditionalZipExtensions() {
-        return line.getOptionValue(ARGUMENT.ADDITIONAL_ZIP_EXTENSIONS);
-    }
-
-    /**
-     * Get the value of cveValidForHours.
-     *
-     * @return the value of cveValidForHours
-     */
-    public Integer getCveValidForHours() {
-        final String v = line.getOptionValue(ARGUMENT.CVE_VALID_FOR_HOURS);
+    public Integer getIntegerValue(String argument) {
+        final String v = line.getOptionValue(argument);
         if (v != null) {
             return Integer.parseInt(v);
         }
@@ -1292,21 +892,17 @@ public final class CliParser {
     }
 
     /**
-     * Returns true if the experimental analyzers are enabled.
+     * Checks if the option is present. If present it will return
+     * <code>true</code>; otherwise <code>false</code>.
      *
-     * @return true if the experimental analyzers are enabled; otherwise null
+     * @param option the option to check
+     * @return <code>true</code> if auto-update is allowed; otherwise
+     * <code>null</code>
      */
-    public Boolean isExperimentalEnabled() {
-        return (line != null && line.hasOption(ARGUMENT.EXPERIMENTAL)) ? true : null;
-    }
-
-    /**
-     * Returns true if the retired analyzers are enabled.
-     *
-     * @return true if the retired analyzers are enabled; otherwise null
-     */
-    public Boolean isRetiredEnabled() {
-        return (line != null && line.hasOption(ARGUMENT.RETIRED)) ? true : null;
+    @SuppressFBWarnings(justification = "Accepting that this is a bad practice - but made more sense in this use case",
+            value = {"NP_BOOLEAN_RETURN_NULL"})
+    public Boolean hasOption(String option) {
+        return (line != null && line.hasOption(option)) ? true : null;
     }
 
     /**
@@ -1315,17 +911,98 @@ public final class CliParser {
      * @return 11 if nothing is set. Otherwise it returns the int passed from
      * the command line arg
      */
-    public int getFailOnCVSS() {
+    public float getFailOnCVSS() {
         if (line.hasOption(ARGUMENT.FAIL_ON_CVSS)) {
             final String value = line.getOptionValue(ARGUMENT.FAIL_ON_CVSS);
             try {
-                return Integer.parseInt(value);
+                return Float.parseFloat(value);
             } catch (NumberFormatException nfe) {
                 return 11;
             }
         } else {
             return 11;
         }
+    }
+
+    /**
+     * Returns the float argument for the given option.
+     *
+     * @param option the option
+     * @param defaultValue the value if the option is not present
+     * @return the value of the argument if present; otherwise the defaultValue
+     */
+    public float getFloatArgument(String option, float defaultValue) {
+        if (line.hasOption(option)) {
+            final String value = line.getOptionValue(option);
+            try {
+                return Integer.parseInt(value);
+            } catch (NumberFormatException nfe) {
+                return defaultValue;
+            }
+        } else {
+            return defaultValue;
+        }
+    }
+
+    /**
+     * Builds a new option.
+     *
+     * @param name the long name
+     * @param description the description
+     * @return a new option
+     */
+    private Option newOption(String name, String description) {
+        return Option.builder().longOpt(name).desc(description).build();
+    }
+
+    /**
+     * Builds a new option.
+     *
+     * @param shortName the short name
+     * @param name the long name
+     * @param description the description
+     * @return a new option
+     */
+    private Option newOption(String shortName, String name, String description) {
+        return Option.builder(shortName).longOpt(name).desc(description).build();
+    }
+
+    /**
+     * Builds a new option.
+     *
+     * @param name the long name
+     * @param arg the argument name
+     * @param description the description
+     * @return a new option
+     */
+    private Option newOptionWithArg(String name, String arg, String description) {
+        return Option.builder().longOpt(name).argName(arg).hasArg().desc(description).build();
+    }
+
+    /**
+     * Builds a new option.
+     *
+     * @param shortName the short name
+     * @param name the long name
+     * @param arg the argument name
+     * @param description the description
+     * @return a new option
+     */
+    private Option newOptionWithArg(String shortName, String name, String arg, String description) {
+        return Option.builder(shortName).longOpt(name).argName(arg).hasArg().desc(description).build();
+    }
+
+    /**
+     * Builds a new option group so that an option can be specified multiple
+     * times on the command line.
+     *
+     * @param option the option to add to the group
+     * @return a new option group
+     */
+    private OptionGroup newOptionGroup(Option option) {
+        final OptionGroup group = new OptionGroup();
+        group.addOption(option);
+        return group;
     }
 
     /**
@@ -1388,22 +1065,6 @@ public final class CliParser {
          */
         public static final String PROJECT = "project";
         /**
-         * The long CLI argument name specifying the name of the application to
-         * be scanned.
-         *
-         * @deprecated project should be used instead
-         */
-        @Deprecated
-        public static final String APP_NAME = "app";
-        /**
-         * The short CLI argument name specifying the name of the application to
-         * be scanned.
-         *
-         * @deprecated project should be used instead
-         */
-        @Deprecated
-        public static final String APP_NAME_SHORT = "a";
-        /**
          * The long CLI argument name asking for help.
          */
         public static final String HELP = "help";
@@ -1432,13 +1093,6 @@ public final class CliParser {
          */
         public static final String PROXY_SERVER = "proxyserver";
         /**
-         * The CLI argument name indicating the proxy url.
-         *
-         * @deprecated use {@link #PROXY_SERVER} instead
-         */
-        @Deprecated
-        public static final String PROXY_URL = "proxyurl";
-        /**
          * The CLI argument name indicating the proxy username.
          */
         public static final String PROXY_USERNAME = "proxyuser";
@@ -1447,6 +1101,10 @@ public final class CliParser {
          */
         public static final String PROXY_PASSWORD = "proxypass";
         /**
+         * The CLI argument name indicating the proxy proxy exclusion list.
+         */
+        public static final String NON_PROXY_HOSTS = "nonProxyHosts";
+        /**
          * The short CLI argument name indicating the connection timeout.
          */
         public static final String CONNECTION_TIMEOUT_SHORT = "c";
@@ -1454,6 +1112,10 @@ public final class CliParser {
          * The CLI argument name indicating the connection timeout.
          */
         public static final String CONNECTION_TIMEOUT = "connectiontimeout";
+        /**
+         * The CLI argument name indicating the connection read timeout.
+         */
+        public static final String CONNECTION_READ_TIMEOUT = "readtimeout";
         /**
          * The short CLI argument name for setting the location of an additional
          * properties file.
@@ -1469,21 +1131,38 @@ public final class CliParser {
          */
         public static final String DATA_DIRECTORY = "data";
         /**
-         * The CLI argument name for setting the URL for the CVE Data Files.
+         * The CLI argument name for setting the URL for the NVD API Endpoint
          */
-        public static final String CVE_MOD_12 = "cveUrl12Modified";
+        public static final String NVD_API_ENDPOINT = "nvdApiEndpoint";
         /**
-         * The CLI argument name for setting the URL for the CVE Data Files.
+         * The CLI argument name for setting the URL for the NVD API Key.
          */
-        public static final String CVE_MOD_20 = "cveUrl20Modified";
+        public static final String NVD_API_KEY = "nvdApiKey";
         /**
-         * The CLI argument name for setting the URL for the CVE Data Files.
-         */
-        public static final String CVE_BASE_12 = "cveUrl12Base";
+        * The CLI argument name for setting the maximum number of retry requests for a single call to the NVD API.
+        */
+        public static final String NVD_API_MAX_RETRY_COUNT = "nvdMaxRetryCount";
         /**
-         * The CLI argument name for setting the URL for the CVE Data Files.
+         * The CLI argument name for setting the number of hours to wait before
+         * checking for new updates from the NVD.
          */
-        public static final String CVE_BASE_20 = "cveUrl20Base";
+        public static final String NVD_API_VALID_FOR_HOURS = "nvdValidForHours";
+        /**
+         * The CLI argument name for the NVD API Data Feed URL.
+         */
+        public static final String NVD_API_DATAFEED_URL = "nvdDatafeed";
+        /**
+         * The username for basic auth to the CVE data.
+         */
+        public static final String NVD_API_DATAFEED_USER = "nvdUser";
+        /**
+         * The password for basic auth to the CVE data.
+         */
+        public static final String NVD_API_DATAFEED_PASSWORD = "nvdPassword";
+        /**
+         * The time in milliseconds to wait between downloading NVD API data.
+         */
+        public static final String NVD_API_DELAY = "nvdApiDelay";
         /**
          * The short CLI argument name for setting the location of the data
          * directory.
@@ -1498,7 +1177,6 @@ public final class CliParser {
          * directory.
          */
         public static final String VERBOSE_LOG_SHORT = "l";
-
         /**
          * The CLI argument name for setting the depth of symbolic links that
          * will be followed.
@@ -1514,18 +1192,25 @@ public final class CliParser {
          */
         public static final String HINTS_FILE = "hints";
         /**
-         * The CLI argument name for setting the number of hours to wait before
-         * checking for new updates from the NVD.
-         */
-        public static final String CVE_VALID_FOR_HOURS = "cveValidForHours";
-        /**
          * Disables the Jar Analyzer.
          */
         public static final String DISABLE_JAR = "disableJar";
         /**
+         * Disable the MS Build Analyzer.
+         */
+        public static final String DISABLE_MSBUILD = "disableMSBuild";
+        /**
          * Disables the Archive Analyzer.
          */
         public static final String DISABLE_ARCHIVE = "disableArchive";
+        /**
+         * Disables the Known Exploited Analyzer.
+         */
+        public static final String DISABLE_KEV = "disableKnownExploited";
+        /**
+         * The URL to the CISA Known Exploited Vulnerability JSON datafeed.
+         */
+        public static final String KEV_URL = "kevURL";
         /**
          * Disables the Python Distribution Analyzer.
          */
@@ -1535,9 +1220,41 @@ public final class CliParser {
          */
         public static final String DISABLE_PY_PKG = "disablePyPkg";
         /**
-         * Disables the Python Package Analyzer.
+         * Disables the Elixir mix audit Analyzer.
+         */
+        public static final String DISABLE_MIX_AUDIT = "disableMixAudit";
+        /**
+         * Disables the Golang Dependency Analyzer.
+         */
+        public static final String DISABLE_GO_DEP = "disableGolangDep";
+        /**
+         * Disables the PHP Composer Analyzer.
          */
         public static final String DISABLE_COMPOSER = "disableComposer";
+        /**
+         * Disables the Perl CPAN File Analyzer.
+         */
+        public static final String DISABLE_CPAN = "disableCpan";
+        /**
+         * Disables the Golang Mod Analyzer.
+         */
+        public static final String DISABLE_GOLANG_MOD = "disableGolangMod";
+        /**
+         * Disables the Dart Analyzer.
+         */
+        public static final String DISABLE_DART = "disableDart";
+        /**
+         * The CLI argument name for setting the path to `go`.
+         */
+        public static final String PATH_TO_GO = "go";
+        /**
+         * The CLI argument name for setting the path to `yarn`.
+         */
+        public static final String PATH_TO_YARN = "yarn";
+        /**
+         * The CLI argument name for setting the path to `pnpm`.
+         */
+        public static final String PATH_TO_PNPM = "pnpm";
         /**
          * Disables the Ruby Gemspec Analyzer.
          */
@@ -1547,6 +1264,22 @@ public final class CliParser {
          */
         public static final String DISABLE_AUTOCONF = "disableAutoconf";
         /**
+         * Disables the Maven install Analyzer.
+         */
+        public static final String DISABLE_MAVEN_INSTALL = "disableMavenInstall";
+        /**
+         * Disables the pip Analyzer.
+         */
+        public static final String DISABLE_PIP = "disablePip";
+        /**
+         * Disables the Pipfile Analyzer.
+         */
+        public static final String DISABLE_PIPFILE = "disablePipfile";
+        /**
+         * Disables the Poetry Analyzer.
+         */
+        public static final String DISABLE_POETRY = "disablePoetry";
+        /**
          * Disables the Cmake Analyzer.
          */
         public static final String DISABLE_CMAKE = "disableCmake";
@@ -1555,9 +1288,17 @@ public final class CliParser {
          */
         public static final String DISABLE_COCOAPODS = "disableCocoapodsAnalyzer";
         /**
+         * Disables the Carthage analyzer.
+         */
+        public static final String DISABLE_CARTHAGE = "disableCarthageAnalyzer";
+        /**
          * Disables the swift package manager analyzer.
          */
         public static final String DISABLE_SWIFT = "disableSwiftPackageManagerAnalyzer";
+        /**
+         * Disables the swift package resolved analyzer.
+         */
+        public static final String DISABLE_SWIFT_RESOLVED = "disableSwiftPackageResolvedAnalyzer";
         /**
          * Disables the Assembly Analyzer.
          */
@@ -1566,6 +1307,10 @@ public final class CliParser {
          * Disables the Ruby Bundler Audit Analyzer.
          */
         public static final String DISABLE_BUNDLE_AUDIT = "disableBundleAudit";
+        /**
+         * Disables the File Name Analyzer.
+         */
+        public static final String DISABLE_FILENAME = "disableFileName";
         /**
          * Disables the Nuspec Analyzer.
          */
@@ -1579,9 +1324,42 @@ public final class CliParser {
          */
         public static final String DISABLE_CENTRAL = "disableCentral";
         /**
+         * Disables the Central Analyzer's ability to cache results locally.
+         */
+        public static final String DISABLE_CENTRAL_CACHE = "disableCentralCache";
+        /**
+         * The alternative URL for Maven Central Search.
+         */
+        public static final String CENTRAL_URL = "centralUrl";
+        /**
          * Disables the Nexus Analyzer.
          */
-        public static final String DISABLE_NEXUS = "disableNexus";
+        public static final String ENABLE_NEXUS = "enableNexus";
+        /**
+         * Disables the Sonatype OSS Index Analyzer.
+         */
+        public static final String DISABLE_OSSINDEX = "disableOssIndex";
+        /**
+         * Disables the Sonatype OSS Index Analyzer's ability to cache results
+         * locally.
+         */
+        public static final String DISABLE_OSSINDEX_CACHE = "disableOssIndexCache";
+        /**
+         * The alternative URL for the Sonatype OSS Index.
+         */
+        public static final String OSSINDEX_URL = "ossIndexUrl";
+        /**
+         * The username for the Sonatype OSS Index.
+         */
+        public static final String OSSINDEX_USERNAME = "ossIndexUsername";
+        /**
+         * The password for the Sonatype OSS Index.
+         */
+        public static final String OSSINDEX_PASSWORD = "ossIndexPassword";
+        /**
+         * The password for the Sonatype OSS Index.
+         */
+        public static final String OSSINDEX_WARN_ONLY_ON_REMOTE_ERRORS = "ossIndexRemoteErrorWarnOnly";
         /**
          * Disables the OpenSSL Analyzer.
          */
@@ -1591,13 +1369,50 @@ public final class CliParser {
          */
         public static final String DISABLE_NODE_JS = "disableNodeJS";
         /**
+         * Skips dev dependencies in Node Package Analyzer.
+         */
+        public static final String NODE_PACKAGE_SKIP_DEV_DEPENDENCIES = "nodePackageSkipDevDependencies";
+        /**
          * Disables the Node Audit Analyzer.
          */
         public static final String DISABLE_NODE_AUDIT = "disableNodeAudit";
         /**
+         * Disables the Yarn Audit Analyzer.
+         */
+        public static final String DISABLE_YARN_AUDIT = "disableYarnAudit";
+        /**
+         * Disables the Pnpm Audit Analyzer.
+         */
+        public static final String DISABLE_PNPM_AUDIT = "disablePnpmAudit";
+        /**
+         * Disables the Node Audit Analyzer's ability to cache results locally.
+         */
+        public static final String DISABLE_NODE_AUDIT_CACHE = "disableNodeAuditCache";
+        /**
+         * Configures the Node Audit Analyzer to skip the dev dependencies.
+         */
+        public static final String DISABLE_NODE_AUDIT_SKIPDEV = "nodeAuditSkipDevDependencies";
+        /**
          * Disables the RetireJS Analyzer.
          */
         public static final String DISABLE_RETIRE_JS = "disableRetireJS";
+        /**
+         * Whether the RetireJS Analyzer will update regardless of the
+         * `autoupdate` setting.
+         */
+        public static final String RETIRE_JS_FORCEUPDATE = "retireJsForceUpdate";
+        /**
+         * The URL to the retire JS repository.
+         */
+        public static final String RETIREJS_URL = "retireJsUrl";
+        /**
+         * The username to the retire JS repository.
+         */
+        public static final String RETIREJS_URL_USER = "retireJsUrlUser";
+        /**
+         * The password to the retire JS repository.
+         */
+        public static final String RETIREJS_URL_PASSWORD = "retireJsUrlPass";
         /**
          * The URL of the nexus server.
          */
@@ -1637,10 +1452,9 @@ public final class CliParser {
          */
         public static final String DB_DRIVER_PATH = "dbDriverPath";
         /**
-         * The CLI argument name for setting the path to mono for .NET Assembly
-         * analysis on non-windows systems.
+         * The CLI argument name for setting the path to dotnet core.
          */
-        public static final String PATH_TO_MONO = "mono";
+        public static final String PATH_TO_CORE = "dotnet";
         /**
          * The CLI argument name for setting extra extensions.
          */
@@ -1654,6 +1468,18 @@ public final class CliParser {
          * bundle analysis.
          */
         public static final String PATH_TO_BUNDLE_AUDIT = "bundleAudit";
+        /**
+         * The CLI argument name for setting the path that should be used as the
+         * working directory that the bundle-audit command used for Ruby bundle
+         * analysis should be executed from. This will allow for the usage of
+         * rbenv
+         */
+        public static final String PATH_TO_BUNDLE_AUDIT_WORKING_DIRECTORY = "bundleAuditWorkingDirectory";
+        /**
+         * The CLI argument name for setting the path to mix_audit for Elixir
+         * analysis.
+         */
+        public static final String PATH_TO_MIX_AUDIT = "mixAudit";
         /**
          * The CLI argument to enable the experimental analyzers.
          */
@@ -1680,7 +1506,6 @@ public final class CliParser {
          * use the proxy.
          */
         public static final String ARTIFACTORY_URL = "artifactoryUrl";
-
         /**
          * The CLI argument for indicating the Artifactory username.
          */
@@ -1693,7 +1518,6 @@ public final class CliParser {
          * The CLI argument for indicating the Artifactory bearer token.
          */
         public static final String ARTIFACTORY_BEARER_TOKEN = "artifactoryBearerToken";
-
         /**
          * The CLI argument for indicating if the Artifactory analyzer should
          * use the proxy.
@@ -1704,10 +1528,40 @@ public final class CliParser {
          * use the parallel analysis.
          */
         public static final String ARTIFACTORY_PARALLEL_ANALYSIS = "artifactoryParallelAnalysis";
-
         /**
-         * The CLI argument to enable the experimental analyzers.
+         * The CLI argument to configure when the execution should be considered
+         * a failure.
          */
         public static final String FAIL_ON_CVSS = "failOnCVSS";
+        /**
+         * The CLI argument to configure if the XML and JSON reports should be
+         * pretty printed.
+         */
+        public static final String PRETTY_PRINT = "prettyPrint";
+        /**
+         * The CLI argument to set the threshold that is considered a failure
+         * when generating the JUNIT report format.
+         */
+        public static final String FAIL_JUNIT_ON_CVSS = "junitFailOnCVSS";
+        /**
+         * The CLI argument to set the number of hours to wait before
+         * re-checking hosted suppressions file for updates.
+         */
+        public static final String DISABLE_HOSTED_SUPPRESSIONS = "disableHostedSuppressions";
+        /**
+         * The CLI argument to set the number of hours to wait before
+         * re-checking hosted suppressions file for updates.
+         */
+        public static final String HOSTED_SUPPRESSIONS_VALID_FOR_HOURS = "hostedSuppressionsValidForHours";
+        /**
+         * The CLI argument to set Whether the hosted suppressions file will
+         * update regardless of the `noupdate` argument.
+         */
+        public static final String HOSTED_SUPPRESSIONS_FORCEUPDATE = "hostedSuppressionsForceUpdate";
+        /**
+         * The CLI argument to set the location of a mirrored hosted
+         * suppressions file .
+         */
+        public static final String HOSTED_SUPPRESSIONS_URL = "hostedSuppressionsUrl";
     }
 }

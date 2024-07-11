@@ -17,17 +17,26 @@
  */
 package org.owasp.dependencycheck.xml.pom;
 
+import java.io.Serializable;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
+
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
  *
- * @author jeremy
+ * @author jeremy long
  */
 @ThreadSafe
-public class License {
+public class License implements Serializable {
 
     /**
-     * The url to the license.
+     * Generated UUID.
+     */
+    private static final long serialVersionUID = 7009115254312746992L;
+
+    /**
+     * The URL to the license.
      */
     private String url;
     /**
@@ -45,7 +54,7 @@ public class License {
      * Constructs a new license.
      *
      * @param name the name of the license
-     * @param url the license url
+     * @param url the license URL
      */
     public License(String name, String url) {
         this.url = url;
@@ -54,18 +63,18 @@ public class License {
     }
 
     /**
-     * Get the value of url.
+     * Get the value of URL.
      *
-     * @return the value of url
+     * @return the value of URL
      */
     public String getUrl() {
         return url;
     }
 
     /**
-     * Set the value of url.
+     * Set the value of URL.
      *
-     * @param url new value of url
+     * @param url new value of URL
      */
     public void setUrl(String url) {
         this.url = url;
@@ -96,10 +105,10 @@ public class License {
      */
     @Override
     public int hashCode() {
-        int hash = 7;
-        hash = 89 * hash + (this.url != null ? this.url.hashCode() : 0);
-        hash = 89 * hash + (this.name != null ? this.name.hashCode() : 0);
-        return hash;
+        return new HashCodeBuilder(13, 49)
+                .append(name)
+                .append(url)
+                .toHashCode();
     }
 
     /**
@@ -110,17 +119,17 @@ public class License {
      */
     @Override
     public boolean equals(Object obj) {
-        if (obj == null) {
+        if (obj == null || !(obj instanceof License)) {
             return false;
         }
-        if (getClass() != obj.getClass()) {
-            return false;
+        if (this == obj) {
+            return true;
         }
-        final License other = (License) obj;
-        if ((this.url == null) ? (other.url != null) : !this.url.equals(other.url)) {
-            return false;
-        }
-        return !((this.name == null) ? (other.name != null) : !this.name.equals(other.name));
+        final License rhs = (License) obj;
+        return new EqualsBuilder()
+                .append(name, rhs.name)
+                .append(url, rhs.url)
+                .isEquals();
     }
 
     /**

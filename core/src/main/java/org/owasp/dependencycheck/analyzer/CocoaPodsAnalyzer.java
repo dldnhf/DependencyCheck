@@ -17,23 +17,31 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import java.io.File;
-import java.io.FileFilter;
-import java.io.IOException;
-import java.nio.charset.Charset;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import javax.annotation.concurrent.ThreadSafe;
-
-import org.apache.commons.io.FileUtils;
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
+import org.owasp.dependencycheck.utils.Checksum;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.Settings;
-import org.owasp.dependencycheck.utils.Checksum;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.concurrent.ThreadSafe;
+import java.io.File;
+import java.io.FileFilter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * This analyzer is used to analyze SWIFT and Objective-C packages by collecting
@@ -50,12 +58,12 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "CocoaPod";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.IOS;
 
     /**
      * The logger.
      */
-//    private static final Logger LOGGER = LoggerFactory.getLogger(CocoaPodsAnalyzer.class);
+    private static final Logger LOGGER = LoggerFactory.getLogger(CocoaPodsAnalyzer.class);
     /**
      * The name of the analyzer.
      */
@@ -88,7 +96,7 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
     /**
      * The capture group #1 is the dependency name, #2 is dependency version
      */
-    private static final Pattern PODFILE_LOCK_DEPENDENCY_PATTERN = Pattern.compile("  - \"?(.*) \\((\\d+\\.\\d+\\.\\d+)\\)\"?");
+    private static final Pattern PODFILE_LOCK_DEPENDENCY_PATTERN = Pattern.compile("  - \"?(.*) \\((\\d+(\\.\\d+){0,4})\\)\"?");
 
     /**
      * Returns the FileFilter
@@ -162,7 +170,7 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
 
         final String contents;
         try {
-            contents = FileUtils.readFileToString(podfileLock.getActualFile(), Charset.defaultCharset());
+            contents = new String(Files.readAllBytes(podfileLock.getActualFile().toPath()), StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new AnalysisException(
                     "Problem occurred while reading dependency file.", e);
@@ -177,6 +185,25 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
             dependency.setEcosystem(DEPENDENCY_ECOSYSTEM);
             dependency.setName(name);
             dependency.setVersion(version);
+
+            try {
+                final PackageURLBuilder builder = PackageURLBuilder.aPackageURL().withType("cocoapods").withName(dependency.getName());
+                if (dependency.getVersion() != null) {
+                    builder.withVersion(dependency.getVersion());
+                }
+                final PackageURL purl = builder.build();
+                dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+            } catch (MalformedPackageURLException ex) {
+                LOGGER.debug("Unable to build package url for cocoapods", ex);
+                final GenericIdentifier id;
+                if (dependency.getVersion() != null) {
+                    id = new GenericIdentifier("cocoapods:" + dependency.getName() + "@" + dependency.getVersion(), Confidence.HIGHEST);
+                } else {
+                    id = new GenericIdentifier("cocoapods:" + dependency.getName(), Confidence.HIGHEST);
+                }
+                dependency.addSoftwareIdentifier(id);
+            }
+
             final String packagePath = String.format("%s:%s", name, version);
             dependency.setPackagePath(packagePath);
             dependency.setDisplayFileName(packagePath);
@@ -202,7 +229,7 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
         dependency.setEcosystem(DEPENDENCY_ECOSYSTEM);
         String contents;
         try {
-            contents = FileUtils.readFileToString(dependency.getActualFile(), Charset.defaultCharset());
+            contents = new String(Files.readAllBytes(dependency.getActualFile().toPath()), StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new AnalysisException(
                     "Problem occurred while reading dependency file.", e);
@@ -211,13 +238,25 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
         if (matcher.find()) {
             contents = contents.substring(matcher.end());
             final String blockVariable = matcher.group(1);
-
+            PackageURLBuilder builder = null;
             final String name = determineEvidence(contents, blockVariable, "name");
             if (!name.isEmpty()) {
                 dependency.addEvidence(EvidenceType.PRODUCT, PODSPEC, "name_project", name, Confidence.HIGHEST);
                 dependency.addEvidence(EvidenceType.VENDOR, PODSPEC, "name_project", name, Confidence.HIGHEST);
                 dependency.setName(name);
+
+                builder = PackageURLBuilder.aPackageURL();
+                builder.withType("cocoapods").withName(name);
             }
+            final String version = determineEvidence(contents, blockVariable, "version");
+            if (!version.isEmpty()) {
+                dependency.addEvidence(EvidenceType.VERSION, PODSPEC, "version", version, Confidence.HIGHEST);
+                dependency.setVersion(version);
+                if (builder != null) {
+                    builder.withVersion(version);
+                }
+            }
+
             final String summary = determineEvidence(contents, blockVariable, "summary");
             if (!summary.isEmpty()) {
                 dependency.addEvidence(EvidenceType.PRODUCT, PODSPEC, "summary", summary, Confidence.HIGHEST);
@@ -236,10 +275,20 @@ public class CocoaPodsAnalyzer extends AbstractFileTypeAnalyzer {
                 dependency.setLicense(license);
             }
 
-            final String version = determineEvidence(contents, blockVariable, "version");
-            if (!version.isEmpty()) {
-                dependency.addEvidence(EvidenceType.VERSION, PODSPEC, "version", version, Confidence.HIGHEST);
-                dependency.setVersion(version);
+            if (builder != null) {
+                try {
+                    final PurlIdentifier purl = new PurlIdentifier(builder.build(), homepage, Confidence.HIGHEST);
+                    dependency.addSoftwareIdentifier(purl);
+                } catch (MalformedPackageURLException ex) {
+                    LOGGER.debug("Unable to generate purl for cocoapod", ex);
+                    final StringBuilder sb = new StringBuilder("pkg:cocoapods/");
+                    sb.append(name);
+                    if (!version.isEmpty()) {
+                        sb.append("@").append(version);
+                    }
+                    final GenericIdentifier id = new GenericIdentifier(sb.toString(), Confidence.HIGHEST);
+                    dependency.addSoftwareIdentifier(id);
+                }
             }
         }
         if (dependency.getVersion() != null && !dependency.getVersion().isEmpty()) {

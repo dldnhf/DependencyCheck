@@ -28,10 +28,13 @@ import java.io.File;
 
 import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.*;
+
 import org.junit.Assume;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.InvalidSettingException;
 import org.owasp.dependencycheck.utils.Settings;
 
@@ -52,6 +55,36 @@ public class NodePackageAnalyzerTest extends BaseTest {
     private Engine engine;
 
     /**
+     * Retrieves the node audit analyzer from the engine.
+     *
+     * @param engine the ODC engine
+     * @return returns the node audit analyzer from the engine
+     */
+    private NodeAuditAnalyzer getNodeAuditAnalyzer(Engine engine) {
+        for (Analyzer a : engine.getAnalyzers()) {
+            if (a instanceof NodeAuditAnalyzer) {
+                return (NodeAuditAnalyzer) a;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Retrieves the node package analyzer from the engine.
+     *
+     * @param engine the ODC engine
+     * @return returns the node package analyzer from the engine
+     */
+    private NodePackageAnalyzer getNodePackageAnalyzer(Engine engine) {
+        for (Analyzer a : engine.getAnalyzers()) {
+            if (a instanceof NodePackageAnalyzer) {
+                return (NodePackageAnalyzer) a;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Correctly setup the analyzer for testing.
      *
      * @throws Exception thrown if there is a problem
@@ -62,10 +95,18 @@ public class NodePackageAnalyzerTest extends BaseTest {
         super.setUp();
         if (getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_PACKAGE_ENABLED)) {
             engine = new Engine(this.getSettings());
-            analyzer = new NodePackageAnalyzer();
+            NodeAuditAnalyzer auditAnalyzer = getNodeAuditAnalyzer(engine);
+            auditAnalyzer.setFilesMatched(true);
+            analyzer = getNodePackageAnalyzer(engine);
             analyzer.setFilesMatched(true);
             analyzer.initialize(getSettings());
-            analyzer.prepare(engine);
+            try {
+                analyzer.prepare(engine);
+            } catch (InitializationException ex) {
+                if (!ex.getMessage().startsWith("Missing package.lock or npm-shrinkwrap.lock file")) {
+                    throw ex;
+                }
+            }
         }
     }
 
@@ -82,7 +123,7 @@ public class NodePackageAnalyzerTest extends BaseTest {
             engine.close();
         }
         super.tearDown();
-        
+
     }
 
     /**
@@ -105,7 +146,7 @@ public class NodePackageAnalyzerTest extends BaseTest {
         assertThat(analyzer.accept(new File("package-lock.json")), is(true));
         assertThat(analyzer.accept(new File("npm-shrinkwrap.json")), is(true));
     }
-    
+
     /**
      * Test of inspect method, of class PythonDistributionAnalyzer.
      *
@@ -123,14 +164,52 @@ public class NodePackageAnalyzerTest extends BaseTest {
         engine.addDependency(toCombine);
         analyzer.analyze(toScan, engine);
         analyzer.analyze(toCombine, engine);
-        assertEquals("Expected 6 dependency", engine.getDependencies().length, 6);
+
+        testLock();
+    }
+
+    private void testLock() {
+        final boolean isMac = System.getProperty("os.name").toLowerCase().contains("mac");
+
+        // test some dependencies
+        boolean bracesFound = false;
+        boolean expandRangeFound = false;
+
         Dependency result = null;
         for (Dependency dep : engine.getDependencies()) {
+            if (!isMac && "fsevents".equals(dep.getName())) {
+                fail("fsevents need to be skipped on non mac");
+            }
+
+            if ("react-dom".equals(dep.getName())) {
+                fail("react-dom need to be skipped because it's an alias");
+            }
+
+            if ("braces".equals(dep.getName())) {
+                bracesFound = true;
+            }
+
+            if ("expand-range".equals(dep.getName())) {
+                expandRangeFound = true;
+            }
+
+            if ("fake_submodule".equals(dep.getName())) {
+                fail("start with file: need to be skipped because it's a local package");
+            }
+
+            if ("react-dom".equals(dep.getName())) {
+                fail("start with file: need to be skipped because it's a local package");
+            }
+
             if ("dns-sync".equals(dep.getName())) {
                 result = dep;
-                break;
             }
         }
+
+        assertTrue("need to contain braces", bracesFound);
+        //check if dependencies of dependencies are imported
+        assertTrue("need to contain expand-range (dependency of braces)", expandRangeFound);
+
         final String vendorString = result.getEvidence(EvidenceType.VENDOR).toString();
         assertThat(vendorString, containsString("Sanjeev Koranga"));
         assertThat(vendorString, containsString("dns-sync"));
@@ -139,6 +218,12 @@ public class NodePackageAnalyzerTest extends BaseTest {
         assertEquals(NodePackageAnalyzer.DEPENDENCY_ECOSYSTEM, result.getEcosystem());
         assertEquals("dns-sync", result.getName());
         assertEquals("0.1.3", result.getVersion());
+
+        // with npm install run on a "non-macOs" system, 90 else
+        // dependencies length change often, maybe not a good idea to test the length, check some dependencies instead
+        //  assertEquals("Expected 40 dependencies", 40, engine.getDependencies().length);
+        // shrinkWrap is not removed because the NodeAudit analyzer is enabled
+        //assertFalse(shrinkwrap.equals(engine.getDependencies()[0]));
     }
 
     /**
@@ -159,9 +244,91 @@ public class NodePackageAnalyzerTest extends BaseTest {
         assertEquals(2, engine.getDependencies().length);
         analyzer.analyze(packageJson, engine);
         assertEquals(1, engine.getDependencies().length); //package-lock was removed without analysis
-        assertTrue(shrinkwrap.equals(engine.getDependencies()[0]));
+        assertEquals(shrinkwrap, engine.getDependencies()[0]);
         analyzer.analyze(shrinkwrap, engine);
-        assertEquals(6, engine.getDependencies().length); //shrinkwrap was removed with analysis adding 6 dependency
-        assertFalse(shrinkwrap.equals(engine.getDependencies()[0]));
+
+        testLock();
+    }
+
+    /**
+     * Test of inspect method, of class PythonDistributionAnalyzer.
+     *
+     * @throws AnalysisException is thrown when an exception occurs.
+     */
+    @Test
+    public void testWithoutLock() throws AnalysisException, InvalidSettingException {
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_PACKAGE_ENABLED), is(true));
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_AUDIT_ENABLED), is(true));
+        final Dependency packageJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/no_lock/package.json"));
+        engine.addDependency(packageJson);
+        analyzer.analyze(packageJson, engine);
+
+        //final boolean isMac = !System.getProperty("os.name").toLowerCase().contains("mac");
+        assertEquals("Expected 1 dependencies", 1, engine.getDependencies().length);
+    }
+
+    /**
+     * Test of inspect method for package-lock v2
+     *
+     * @throws AnalysisException is thrown when an exception occurs.
+     */
+    @Test
+    public void testPackageLockV2() throws AnalysisException, InvalidSettingException {
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_PACKAGE_ENABLED), is(true));
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_AUDIT_ENABLED), is(true));
+        final Dependency packageJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/test_lockv2/package.json"));
+        final Dependency packageLockJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/test_lockv2/package-lock.json"));
+        engine.addDependency(packageJson);
+        engine.addDependency(packageLockJson);
+        analyzer.analyze(packageJson, engine);
+        assertEquals("Expected 1 dependencies", 1, engine.getDependencies().length);
+        analyzer.analyze(packageLockJson, engine);
+        assertEquals("Expected 1 dependencies", 6, engine.getDependencies().length);
+    }
+
+    /**
+     * Test of inspect method for package-lock v3
+     *
+     * @throws AnalysisException is thrown when an exception occurs.
+     */
+    @Test
+    public void testPackageLockV3() throws AnalysisException, InvalidSettingException {
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_PACKAGE_ENABLED), is(true));
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_AUDIT_ENABLED), is(true));
+        final Dependency packageJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/test_lockv3/package.json"));
+        final Dependency packageLockJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/test_lockv3/package-lock.json"));
+        engine.addDependency(packageJson);
+        engine.addDependency(packageLockJson);
+        analyzer.analyze(packageJson, engine);
+        assertEquals("Expected 1 dependencies", 1, engine.getDependencies().length);
+        analyzer.analyze(packageLockJson, engine);
+        assertEquals("Expected 1 dependencies", 6, engine.getDependencies().length);
+    }
+
+    /**
+     * Test of analysis of package with a local package as a dependency.
+     *
+     * This test crashes with an NPE if issue #1947 isn't resolved.
+     *
+     * @throws AnalysisException if there was a problem with the analysis
+     */
+    @Test
+    public void testLocalPackageDependency() throws AnalysisException, InvalidSettingException {
+        Assume.assumeThat(getSettings().getBoolean(Settings.KEYS.ANALYZER_NODE_PACKAGE_ENABLED), is(true));
+        final Dependency packageJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/local_package/package.json"));
+        final Dependency packageLockJson = new Dependency(BaseTest.getResourceAsFile(this,
+                "nodejs/local_package/package-lock.json"));
+        engine.addDependency(packageJson);
+        engine.addDependency(packageLockJson);
+        analyzer.analyze(packageJson, engine);
+        assertEquals("Expected 1 dependencies", 1, engine.getDependencies().length);
+        analyzer.analyze(packageLockJson, engine);
+        assertEquals("Expected 2 dependencies", 2, engine.getDependencies().length);
     }
 }

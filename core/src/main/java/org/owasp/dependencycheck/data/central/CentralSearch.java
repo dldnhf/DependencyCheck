@@ -17,6 +17,7 @@
  */
 package org.owasp.dependencycheck.data.central;
 
+import org.owasp.dependencycheck.utils.TooManyRequestsException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.HttpURLConnection;
@@ -32,6 +33,9 @@ import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
+import org.apache.commons.jcs3.access.exception.CacheException;
+import org.owasp.dependencycheck.data.cache.DataCache;
+import org.owasp.dependencycheck.data.cache.DataCacheFactory;
 import org.owasp.dependencycheck.data.nexus.MavenArtifact;
 import org.owasp.dependencycheck.utils.Settings;
 import org.owasp.dependencycheck.utils.URLConnectionFactory;
@@ -73,6 +77,10 @@ public class CentralSearch {
      * The configured settings.
      */
     private final Settings settings;
+    /**
+     * Persisted disk cache for `npm audit` results.
+     */
+    private DataCache<List<MavenArtifact>> cache;
 
     /**
      * Creates a NexusSearch for the given repository URL.
@@ -104,6 +112,15 @@ public class CentralSearch {
             useProxy = false;
             LOGGER.debug("Not using proxy");
         }
+        if (settings.getBoolean(Settings.KEYS.ANALYZER_CENTRAL_USE_CACHE, true)) {
+            try {
+                final DataCacheFactory factory = new DataCacheFactory(settings);
+                cache = factory.getCentralCache();
+            } catch (CacheException ex) {
+                settings.setBoolean(Settings.KEYS.ANALYZER_CENTRAL_USE_CACHE, false);
+                LOGGER.debug("Error creating cache, disabling caching", ex);
+            }
+        }
     }
 
     /**
@@ -115,15 +132,27 @@ public class CentralSearch {
      * @return the populated Maven GAV.
      * @throws FileNotFoundException if the specified artifact is not found
      * @throws IOException if it's unable to connect to the specified repository
+     * @throws TooManyRequestsException if Central has received too many
+     * requests.
      */
-    public List<MavenArtifact> searchSha1(String sha1) throws IOException {
+    public List<MavenArtifact> searchSha1(String sha1) throws IOException, TooManyRequestsException {
         if (null == sha1 || !sha1.matches("^[0-9A-Fa-f]{40}$")) {
             throw new IllegalArgumentException("Invalid SHA1 format");
         }
-        List<MavenArtifact> result = null;
+        if (cache != null) {
+            final List<MavenArtifact> cached = cache.get(sha1);
+            if (cached != null) {
+                LOGGER.debug("cache hit for Central: " + sha1);
+                if (cached.isEmpty()) {
+                    throw new FileNotFoundException("Artifact not found in Central");
+                }
+                return cached;
+            }
+        }
+        final List<MavenArtifact> result = new ArrayList<>();
         final URL url = new URL(String.format(query, rootURL, sha1));
 
-        LOGGER.debug("Searching Central url {}", url);
+        LOGGER.trace("Searching Central url {}", url);
 
         // Determine if we need to use a proxy. The rules:
         // 1) If the proxy is set, AND the setting is set to true, use the proxy
@@ -149,7 +178,6 @@ public class CentralSearch {
                 if ("0".equals(numFound)) {
                     missing = true;
                 } else {
-                    result = new ArrayList<>();
                     final NodeList docs = (NodeList) xpath.evaluate("/response/result/doc", doc, XPathConstants.NODESET);
                     for (int i = 0; i < docs.getLength(); i++) {
                         final String g = xpath.evaluate("./str[@name='g']", docs.item(i));
@@ -168,30 +196,43 @@ public class CentralSearch {
                                 jarAvailable = true;
                             }
                         }
-
-//                        attributes = (NodeList) xpath.evaluate("./arr[@name='tags']/str", docs.item(i), XPathConstants.NODESET);
-//                        boolean useHTTPS = true;//false;
-//                        for (int x = 0; x < attributes.getLength(); x++) {
-//                            final String tmp = xpath.evaluate(".", attributes.item(x));
-//                            if ("https".equals(tmp)) {
-//                                useHTTPS = true;
-//                            }
-//                        }
-                        LOGGER.trace("Version: {}", v);
-                        result.add(new MavenArtifact(g, a, v, jarAvailable, pomAvailable));
+                        final String centralContentUrl = settings.getString(Settings.KEYS.CENTRAL_CONTENT_URL);
+                        String artifactUrl = null;
+                        String pomUrl = null;
+                        if (jarAvailable) {
+                            //org/springframework/spring-core/3.2.0.RELEASE/spring-core-3.2.0.RELEASE.pom
+                            artifactUrl = centralContentUrl + g.replace('.', '/') + '/' + a + '/'
+                                    + v + '/' + a + '-' + v + ".jar";
+                        }
+                        if (pomAvailable) {
+                            //org/springframework/spring-core/3.2.0.RELEASE/spring-core-3.2.0.RELEASE.pom
+                            pomUrl = centralContentUrl + g.replace('.', '/') + '/' + a + '/'
+                                    + v + '/' + a + '-' + v + ".pom";
+                        }
+                        result.add(new MavenArtifact(g, a, v, artifactUrl, pomUrl));
                     }
                 }
             } catch (ParserConfigurationException | IOException | SAXException | XPathExpressionException e) {
                 // Anything else is jacked up XML stuff that we really can't recover from well
-                throw new IOException(e.getMessage(), e);
+                final String errorMessage = "Failed to parse MavenCentral XML Response: " + e.getMessage();
+                throw new IOException(errorMessage, e);
             }
 
             if (missing) {
+                if (cache != null) {
+                    cache.put(sha1, result);
+                }
                 throw new FileNotFoundException("Artifact not found in Central");
             }
+        } else if (conn.getResponseCode() == 429) {
+            final String errorMessage = "Too many requests sent to MavenCentral; additional requests are being rejected.";
+            throw new TooManyRequestsException(errorMessage);
         } else {
             final String errorMessage = "Could not connect to MavenCentral (" + conn.getResponseCode() + "): " + conn.getResponseMessage();
             throw new IOException(errorMessage);
+        }
+        if (cache != null) {
+            cache.put(sha1, result);
         }
         return result;
     }

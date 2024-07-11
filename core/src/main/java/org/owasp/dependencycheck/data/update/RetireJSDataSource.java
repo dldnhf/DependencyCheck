@@ -18,29 +18,25 @@
 package org.owasp.dependencycheck.data.update;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.nio.file.Files;
-import java.nio.file.StandardCopyOption;
 import javax.annotation.concurrent.ThreadSafe;
-import org.apache.commons.io.IOUtils;
+
 import org.owasp.dependencycheck.Engine;
+import org.owasp.dependencycheck.data.nvdcve.DatabaseProperties;
 import org.owasp.dependencycheck.data.update.exception.UpdateException;
-import org.owasp.dependencycheck.utils.InvalidSettingException;
+import org.owasp.dependencycheck.exception.WriteLockException;
+import org.owasp.dependencycheck.utils.Downloader;
+import org.owasp.dependencycheck.utils.ResourceNotFoundException;
 import org.owasp.dependencycheck.utils.Settings;
-import org.owasp.dependencycheck.utils.URLConnectionFactory;
+import org.owasp.dependencycheck.utils.TooManyRequestsException;
+import org.owasp.dependencycheck.utils.WriteLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Checks the gh-pages dependency-check site to determine the current released
- * version number. If the released version number is greater than the running
- * version number a warning is printed recommending that an upgrade be
- * performed.
+ * Downloads a local copy of the RetireJS repository.
  *
  * @author Jeremy Long
  */
@@ -60,18 +56,13 @@ public class RetireJSDataSource implements CachedWebDataSource {
      */
     private Settings settings;
     /**
+     * The properties obtained from the database.
+     */
+    private DatabaseProperties dbProperties = null;
+    /**
      * The default URL to the RetireJS JavaScript repository.
      */
-    private static final String DEFAULT_JS_URL = "https://raw.githubusercontent.com/Retirejs/retire.js/master/repository/jsrepository.json";
-
-    /**
-     * Constructs a new engine version check utility for testing.
-     *
-     * @param settings the configured settings
-     */
-    protected RetireJSDataSource(Settings settings) {
-        this.settings = settings;
-    }
+    public static final String DEFAULT_JS_URL = "https://raw.githubusercontent.com/Retirejs/retire.js/master/repository/jsrepository.json";
 
     /**
      * Constructs a new engine version check utility.
@@ -82,29 +73,34 @@ public class RetireJSDataSource implements CachedWebDataSource {
     /**
      * Downloads the current RetireJS data source.
      *
+     * @param engine a reference to the ODC Engine
+     * @return returns false as no updates are made to the database
      * @throws UpdateException thrown if the update failed
      */
     @Override
-    public void update(Engine engine) throws UpdateException {
+    public boolean update(Engine engine) throws UpdateException {
         this.settings = engine.getSettings();
-        String url = null;
+        this.dbProperties = engine.getDatabase().getDatabaseProperties();
+        final String configuredUrl = settings.getString(Settings.KEYS.ANALYZER_RETIREJS_REPO_JS_URL, DEFAULT_JS_URL);
+        final boolean autoupdate = settings.getBoolean(Settings.KEYS.AUTO_UPDATE, true);
+        final boolean forceupdate = settings.getBoolean(Settings.KEYS.ANALYZER_RETIREJS_FORCEUPDATE, false);
+        final boolean enabled = settings.getBoolean(Settings.KEYS.ANALYZER_RETIREJS_ENABLED, true);
         try {
-            final boolean autoupdate = settings.getBoolean(Settings.KEYS.AUTO_UPDATE, true);
-            final boolean enabled = settings.getBoolean(Settings.KEYS.ANALYZER_RETIREJS_ENABLED, true);
-            final File repoFile = new File(settings.getDataDirectory(), "jsrepository.json");
-            final boolean proceed = enabled && autoupdate && shouldUpdagte(repoFile);
+            final URL url = new URL(configuredUrl);
+            final File filepath = new File(url.getPath());
+            final File repoFile = new File(settings.getDataDirectory(), filepath.getName());
+            final boolean proceed = enabled && (forceupdate || (autoupdate && shouldUpdate(repoFile)));
             if (proceed) {
                 LOGGER.debug("Begin RetireJS Update");
-                url = settings.getString(Settings.KEYS.ANALYZER_RETIREJS_REPO_JS_URL, DEFAULT_JS_URL);
-                initializeRetireJsRepo(settings, new URL(url));
+                initializeRetireJsRepo(settings, url, repoFile);
+                dbProperties.save(DatabaseProperties.RETIRE_LAST_CHECKED, Long.toString(System.currentTimeMillis() / 1000));
             }
-        } catch (InvalidSettingException ex) {
-            throw new UpdateException("Unable to determine if autoupdate is enabled", ex);
         } catch (MalformedURLException ex) {
-            throw new UpdateException(String.format("Inavlid URL for RetireJS repository (%s)", url), ex);
+            throw new UpdateException(String.format("Invalid URL for RetireJS repository (%s)", configuredUrl), ex);
         } catch (IOException ex) {
             throw new UpdateException("Unable to get the data directory", ex);
         }
+        return false;
     }
 
     /**
@@ -116,11 +112,15 @@ public class RetireJSDataSource implements CachedWebDataSource {
      * @throws NumberFormatException thrown if an invalid value is contained in
      * the database properties
      */
-    protected boolean shouldUpdagte(File repo) throws NumberFormatException {
+    protected boolean shouldUpdate(File repo) throws NumberFormatException {
         boolean proceed = true;
         if (repo != null && repo.isFile()) {
             final int validForHours = settings.getInt(Settings.KEYS.ANALYZER_RETIREJS_REPO_VALID_FOR_HOURS, 0);
-            final long lastUpdatedOn = repo.lastModified();
+            long lastUpdatedOn = dbProperties.getPropertyInSeconds(DatabaseProperties.RETIRE_LAST_CHECKED);
+            if (lastUpdatedOn <= 0) {
+                //fall back on conversion from file last modified to storing in the db.
+                lastUpdatedOn = repo.lastModified();
+            }
             final long now = System.currentTimeMillis();
             LOGGER.debug("Last updated: {}", lastUpdatedOn);
             LOGGER.debug("Now: {}", now);
@@ -137,38 +137,46 @@ public class RetireJSDataSource implements CachedWebDataSource {
      * Initializes the local RetireJS repository
      *
      * @param settings a reference to the dependency-check settings
-     * @param repoUrl the URL to the RetireJS repo to use
+     * @param repoUrl the URL to the RetireJS repository to use
+     * @param repoFile the filename to use for the RetireJS repository
      * @throws UpdateException thrown if there is an exception during
      * initialization
      */
-    private void initializeRetireJsRepo(Settings settings, URL repoUrl) throws UpdateException {
-        try {
-            final File dataDir = settings.getDataDirectory();
-            final File tmpDir = settings.getTempDirectory();
-            boolean useProxy = false;
-            if (null != settings.getString(Settings.KEYS.PROXY_SERVER)) {
-                useProxy = true;
-                LOGGER.debug("Using proxy");
-            }
+    @SuppressWarnings("try")
+    private void initializeRetireJsRepo(Settings settings, URL repoUrl, File repoFile) throws UpdateException {
+        try (WriteLock lock = new WriteLock(settings, true, repoFile.getName() + ".lock")) {
             LOGGER.debug("RetireJS Repo URL: {}", repoUrl.toExternalForm());
-            final URLConnectionFactory factory = new URLConnectionFactory(settings);
-            final HttpURLConnection conn = factory.createHttpURLConnection(repoUrl, useProxy);
-            final String filename = repoUrl.getFile().substring(repoUrl.getFile().lastIndexOf("/") + 1, repoUrl.getFile().length());
-            if (conn.getResponseCode() == HttpURLConnection.HTTP_OK) {
-                final File tmpFile = new File(tmpDir, filename);
-                final File repoFile = new File(dataDir, filename);
-                try (InputStream inputStream = conn.getInputStream();
-                        FileOutputStream outputStream = new FileOutputStream(tmpFile)) {
-                    IOUtils.copy(inputStream, outputStream);
-                }
-                //using move fails if target and destination are on different disks which does happen (see #1394 and #1404)
-                Files.copy(tmpFile.toPath(), repoFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                if (!tmpFile.delete()) {
-                    tmpFile.deleteOnExit();
+            final Downloader downloader = new Downloader(settings);
+            downloader.fetchFile(repoUrl, repoFile, Settings.KEYS.ANALYZER_RETIREJS_REPO_JS_USER, Settings.KEYS.ANALYZER_RETIREJS_REPO_JS_PASSWORD);
+        } catch (IOException | TooManyRequestsException | ResourceNotFoundException | WriteLockException ex) {
+            throw new UpdateException("Failed to initialize the RetireJS repo", ex);
+        }
+    }
+
+    @Override
+    @SuppressWarnings("try")
+    public boolean purge(Engine engine) {
+        this.settings = engine.getSettings();
+        boolean result = true;
+        try {
+            final File dataDir = engine.getSettings().getDataDirectory();
+            final URL repoUrl = new URL(engine.getSettings().getString(Settings.KEYS.ANALYZER_RETIREJS_REPO_JS_URL, DEFAULT_JS_URL));
+            final String filename = repoUrl.getFile().substring(repoUrl.getFile().lastIndexOf("/") + 1);
+            final File repo = new File(dataDir, filename);
+            if (repo.exists()) {
+                try (WriteLock lock = new WriteLock(settings, true, filename + ".lock")) {
+                    if (repo.delete()) {
+                        LOGGER.info("RetireJS repo removed successfully");
+                    } else {
+                        LOGGER.error("Unable to delete '{}'; please delete the file manually", repo.getAbsolutePath());
+                        result = false;
+                    }
                 }
             }
-        } catch (IOException e) {
-            throw new UpdateException("Failed to initialize the RetireJS repo", e);
+        } catch (WriteLockException | IOException ex) {
+            LOGGER.error("Unable to delete the RetireJS repo - invalid configuration");
+            result = false;
         }
+        return result;
     }
 }

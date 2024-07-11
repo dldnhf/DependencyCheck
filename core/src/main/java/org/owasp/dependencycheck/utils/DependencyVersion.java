@@ -24,6 +24,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.annotation.concurrent.NotThreadSafe;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.jetbrains.annotations.NotNull;
 
 /**
  * <p>
@@ -75,7 +77,9 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
     public final void parseVersion(String version) {
         versionParts = new ArrayList<>();
         if (version != null) {
-            final Pattern rx = Pattern.compile("(\\d+[a-z]{1,3}$|[a-z]+\\d+|\\d+|(release|beta|alpha)$)");
+            final Pattern rx = Pattern
+                    .compile("(\\d+[a-z]{1,3}$|[a-z]{1,3}[_-]?\\d+|\\d+|(rc|release|snapshot|beta|alpha)$)",
+                            Pattern.CASE_INSENSITIVE);
             final Matcher matcher = rx.matcher(version.toLowerCase());
             while (matcher.find()) {
                 versionParts.add(matcher.group());
@@ -109,6 +113,7 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
      *
      * @return an iterator for the version parts
      */
+    @NotNull
     @Override
     public Iterator<String> iterator() {
         return versionParts.iterator();
@@ -132,17 +137,15 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
      */
     @Override
     public boolean equals(Object obj) {
-        if (obj == null) {
+        if (obj == null || !(obj instanceof DependencyVersion)) {
             return false;
         }
-        if (getClass() != obj.getClass()) {
-            return false;
+        if (this == obj) {
+            return true;
         }
         final DependencyVersion other = (DependencyVersion) obj;
-        final int minVersionMatchLength = (this.versionParts.size() < other.versionParts.size())
-                ? this.versionParts.size() : other.versionParts.size();
-        final int maxVersionMatchLength = (this.versionParts.size() > other.versionParts.size())
-                ? this.versionParts.size() : other.versionParts.size();
+        final int minVersionMatchLength = Math.min(this.versionParts.size(), other.versionParts.size());
+        final int maxVersionMatchLength = Math.max(this.versionParts.size(), other.versionParts.size());
 
         if (minVersionMatchLength == 1 && maxVersionMatchLength >= 3) {
             return false;
@@ -187,9 +190,9 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
      */
     @Override
     public int hashCode() {
-        int hash = 5;
-        hash = 71 * hash + (this.versionParts != null ? this.versionParts.hashCode() : 0);
-        return hash;
+        return new HashCodeBuilder(5, 71)
+                .append(versionParts)
+                .toHashCode();
     }
 
     /**
@@ -208,8 +211,7 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
             return false;
         }
 
-        final int max = (this.versionParts.size() < version.versionParts.size())
-                ? this.versionParts.size() : version.versionParts.size();
+        final int max = Math.min(this.versionParts.size(), version.versionParts.size());
 
         boolean ret = true;
         for (int i = 0; i < max; i++) {
@@ -230,13 +232,13 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
     }
 
     @Override
-    public int compareTo(DependencyVersion version) {
+    public int compareTo(@NotNull DependencyVersion version) {
         if (version == null) {
             return 1;
         }
         final List<String> left = this.getVersionParts();
         final List<String> right = version.getVersionParts();
-        final int max = left.size() < right.size() ? left.size() : right.size();
+        final int max = Math.min(left.size(), right.size());
 
         for (int i = 0; i < max; i++) {
             final String lStr = left.get(i);
@@ -261,12 +263,6 @@ public class DependencyVersion implements Iterable<String>, Comparable<Dependenc
                 }
             }
         }
-        if (left.size() < right.size()) {
-            return -1;
-        } else if (left.size() > right.size()) {
-            return 1;
-        } else {
-            return 0;
-        }
+        return Integer.compare(left.size(), right.size());
     }
 }

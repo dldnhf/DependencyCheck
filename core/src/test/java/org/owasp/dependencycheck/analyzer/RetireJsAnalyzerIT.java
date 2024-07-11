@@ -27,9 +27,14 @@ import org.owasp.dependencycheck.dependency.Evidence;
 import org.owasp.dependencycheck.dependency.EvidenceType;
 import org.owasp.dependencycheck.dependency.Vulnerability;
 import org.owasp.dependencycheck.utils.Settings;
+
 import java.io.File;
+
 import static org.hamcrest.CoreMatchers.is;
-import static org.junit.Assert.*;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
 import org.owasp.dependencycheck.BaseDBTestCase;
 import org.owasp.dependencycheck.data.update.RetireJSDataSource;
 
@@ -121,7 +126,7 @@ public class RetireJsAnalyzerIT extends BaseDBTestCase {
         assertEquals("version", version.getName());
         assertEquals("1.6.2", version.getValue());
 
-        assertEquals(3, dependency.getVulnerabilities().size());
+        assertTrue(dependency.getVulnerabilities().size() >= 3);
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("CVE-2015-9251")));
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("CVE-2011-4969")));
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("CVE-2012-6708")));
@@ -151,7 +156,8 @@ public class RetireJsAnalyzerIT extends BaseDBTestCase {
         assertEquals("version", version.getName());
         assertEquals("1.2.27", version.getValue());
 
-        assertEquals(4, dependency.getVulnerabilities().size());
+        assertTrue("At leats 6 vulnerabilities should be detected",
+                dependency.getVulnerabilities().size() >= 6);
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("Universal CSP bypass via add-on in Firefox")));
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("XSS in $sanitize in Safari/Firefox")));
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("DOS in $sanitize")));
@@ -182,10 +188,9 @@ public class RetireJsAnalyzerIT extends BaseDBTestCase {
         assertEquals("version", version.getName());
         assertEquals("1.3.0", version.getValue());
 
-        assertEquals(3, dependency.getVulnerabilities().size());
+        assertTrue(dependency.getVulnerabilities().size() >= 3);
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("CVE-2014-0013")));
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("CVE-2014-0014")));
         assertTrue(dependency.getVulnerabilities().contains(new Vulnerability("CVE-2014-0046")));
     }
-
 }

@@ -17,22 +17,30 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import java.io.File;
-import java.io.FileFilter;
-import java.io.IOException;
-import java.nio.charset.Charset;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import javax.annotation.concurrent.ThreadSafe;
-
-import org.apache.commons.io.FileUtils;
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.Settings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.concurrent.ThreadSafe;
+import java.io.File;
+import java.io.FileFilter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * This analyzer is used to analyze the SWIFT Package Manager
@@ -46,10 +54,15 @@ import org.owasp.dependencycheck.utils.Settings;
 public class SwiftPackageManagerAnalyzer extends AbstractFileTypeAnalyzer {
 
     /**
+     * The logger.
+     */
+    private static final Logger LOGGER = LoggerFactory.getLogger(SwiftPackageManagerAnalyzer.class);
+
+    /**
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "Swift.PM";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.IOS;
 
     /**
      * The name of the analyzer.
@@ -124,18 +137,29 @@ public class SwiftPackageManagerAnalyzer extends AbstractFileTypeAnalyzer {
     }
 
     @Override
-    protected void analyzeDependency(Dependency dependency, Engine engine)
-            throws AnalysisException {
+    protected void analyzeDependency(Dependency dependency, Engine engine) throws AnalysisException {
+        try {
+            analyzeSpmFileDependency(dependency);
 
+        } catch (IOException ex) {
+            throw new AnalysisException(
+                    "Problem occurred while reading dependency file: " + dependency.getActualFilePath(), ex);
+        }
+    }
+
+    /**
+     * Analyzes the SPM file and adds the evidence to the dependency.
+     *
+     * @param dependency the dependency
+     * @throws IOException thrown if there is an error analyzing the `podspec`
+     * file
+     */
+    private void analyzeSpmFileDependency(Dependency dependency)
+            throws AnalysisException, IOException {
         dependency.setEcosystem(DEPENDENCY_ECOSYSTEM);
 
-        final String contents;
-        try {
-            contents = FileUtils.readFileToString(dependency.getActualFile(), Charset.defaultCharset());
-        } catch (IOException e) {
-            throw new AnalysisException(
-                    "Problem occurred while reading dependency file.", e);
-        }
+        final String contents = new String(Files.readAllBytes(dependency.getActualFile().toPath()), StandardCharsets.UTF_8);
+
         final Matcher matcher = SPM_BLOCK_PATTERN.matcher(contents);
         if (matcher.find()) {
             final String packageDescription = matcher.group(1);
@@ -161,6 +185,24 @@ public class SwiftPackageManagerAnalyzer extends AbstractFileTypeAnalyzer {
             } else {
                 dependency.setDisplayFileName(dependency.getName());
             }
+
+            try {
+                final PackageURLBuilder builder = PackageURLBuilder.aPackageURL().withType("swift").withName(dependency.getName());
+                if (dependency.getVersion() != null) {
+                    builder.withVersion(dependency.getVersion());
+                }
+                final PackageURL purl = builder.build();
+                dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+            } catch (MalformedPackageURLException ex) {
+                LOGGER.debug("Unable to build package url for swift", ex);
+                final GenericIdentifier id;
+                if (dependency.getVersion() != null) {
+                    id = new GenericIdentifier("swift:" + dependency.getName() + "@" + dependency.getVersion(), Confidence.HIGHEST);
+                } else {
+                    id = new GenericIdentifier("swift:" + dependency.getName(), Confidence.HIGHEST);
+                }
+                dependency.addSoftwareIdentifier(id);
+            }
         }
         setPackagePath(dependency);
     }
@@ -178,7 +220,7 @@ public class SwiftPackageManagerAnalyzer extends AbstractFileTypeAnalyzer {
      * @return the string that was added as evidence
      */
     private String addStringEvidence(Dependency dependency, EvidenceType type,
-            String packageDescription, String field, String fieldPattern, Confidence confidence) {
+                                     String packageDescription, String field, String fieldPattern, Confidence confidence) {
         String value = "";
 
         final Matcher matcher = Pattern.compile(
@@ -193,7 +235,6 @@ public class SwiftPackageManagerAnalyzer extends AbstractFileTypeAnalyzer {
                 dependency.addEvidence(type, SPM_FILE_NAME, field, value, confidence);
             }
         }
-
         return value;
     }
 

@@ -17,14 +17,13 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 import javax.annotation.concurrent.ThreadSafe;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.dependency.Dependency;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * <p>
@@ -41,11 +40,6 @@ import org.slf4j.LoggerFactory;
  */
 @ThreadSafe
 public abstract class AbstractDependencyComparingAnalyzer extends AbstractAnalyzer {
-
-    /**
-     * The Logger.
-     */
-    private static final Logger LOGGER = LoggerFactory.getLogger(AbstractDependencyComparingAnalyzer.class);
 
     /**
      * a flag indicating if this analyzer has run. This analyzer only runs once.
@@ -95,6 +89,7 @@ public abstract class AbstractDependencyComparingAnalyzer extends AbstractAnalyz
             if (dependencies.length < 2) {
                 return;
             }
+            Arrays.sort(dependencies, Dependency.NAME_COMPARATOR);
             for (int x = 0; x < dependencies.length - 1; x++) {
                 final Dependency dependency = dependencies[x];
                 if (!dependenciesToRemove.contains(dependency)) {
@@ -106,9 +101,7 @@ public abstract class AbstractDependencyComparingAnalyzer extends AbstractAnalyz
                     }
                 }
             }
-            for (Dependency d : dependenciesToRemove) {
-                engine.removeDependency(d);
-            }
+            dependenciesToRemove.forEach(engine::removeDependency);
         }
     }
 
@@ -120,6 +113,6 @@ public abstract class AbstractDependencyComparingAnalyzer extends AbstractAnalyz
      * @param dependenciesToRemove a set of dependencies that will be removed
      * @return true if a dependency is removed; otherwise false
      */
-    protected abstract boolean evaluateDependencies(final Dependency dependency,
-            final Dependency nextDependency, final Set<Dependency> dependenciesToRemove);
+    protected abstract boolean evaluateDependencies(Dependency dependency,
+            Dependency nextDependency, Set<Dependency> dependenciesToRemove);
 }

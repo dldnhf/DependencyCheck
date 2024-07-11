@@ -21,6 +21,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.lang.reflect.InvocationTargetException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -53,7 +54,9 @@ public final class DriverLoader {
      */
     public static void cleanup(Driver driver) {
         try {
+            LOGGER.debug("Begin deregister driver");
             DriverManager.deregisterDriver(driver);
+            LOGGER.debug("End deregister driver");
         } catch (SQLException ex) {
             LOGGER.debug("An error occurred unloading the database driver", ex);
         } catch (Throwable unexpected) {
@@ -95,6 +98,7 @@ public final class DriverLoader {
      * @return the loaded Driver
      * @throws DriverLoadException thrown if the driver cannot be loaded
      */
+    @SuppressWarnings("StringSplitter")
     public static Driver load(String className, String pathToDriver) throws DriverLoadException {
         final ClassLoader parent = ClassLoader.getSystemClassLoader();
         final List<URL> urls = new ArrayList<>();
@@ -124,12 +128,8 @@ public final class DriverLoader {
                 }
             }
         }
-        final URLClassLoader loader = AccessController.doPrivileged(new PrivilegedAction<URLClassLoader>() {
-            @Override
-            public URLClassLoader run() {
-                return new URLClassLoader(urls.toArray(new URL[urls.size()]), parent);
-            }
-        });
+        final URLClassLoader loader = AccessController.doPrivileged((PrivilegedAction<URLClassLoader>) () ->
+                new URLClassLoader(urls.toArray(new URL[0]), parent));
 
         return load(className, loader);
     }
@@ -147,14 +147,15 @@ public final class DriverLoader {
         try {
             final Class<?> c = Class.forName(className, true, loader);
             //final Class c = loader.loadClass(className);
-            final Driver driver = (Driver) c.newInstance();
+            final Driver driver = (Driver) c.getDeclaredConstructor().newInstance();
 
             //TODO add usage count so we don't de-register a driver that is in use.
             final Driver shim = new DriverShim(driver);
             //using the DriverShim to get around the fact that the DriverManager won't register a driver not in the base class path
             DriverManager.registerDriver(shim);
             return shim;
-        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | SQLException ex) {
+        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | SQLException
+                | NoSuchMethodException | SecurityException | IllegalArgumentException | InvocationTargetException ex) {
             final String msg = String.format("Unable to load database driver '%s'", className);
             LOGGER.debug(msg, ex);
             throw new DriverLoadException(msg, ex);

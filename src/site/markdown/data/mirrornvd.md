@@ -1,23 +1,24 @@
-Mirroring the NVD from NIST
-===========================
-Several organizations have opted to mirror the NVD on an internal server
-and have the dependency-check clients simply pull the updates from the
-mirror. This setup is fairly simple:
+Mirroring External Resources
+============================================================
+If an organization blocks the servers performing dependency-check scans from
+downloading content on the internet they will need to mirror two data sources:
+The NVD API and the Retire JS repository.
 
-<ol>
-<li>Setup a nightly job to pull down the latest NVD files files from NIST
- <ul>
-   <li>Note, all of the NVD files must be downloaded: both 1.2 and 2.0 schema for 2002 on.</li>
-   <li>See the <a href="https://github.com/stevespringett/nist-data-mirror/">Nist-Data-Mirror</a> project on github.</li>
- </ul>
-</li>
-<li>Configure the dependency-check clients to use the internal CVE urls. Note, all four URLs
-   must be specified (see the configuration for the specific dependency-check client used):
-   <ul>
-     <li>cveUrl12Modified</li>
-     <li>cveUrl20Modified</li>
-     <li>cveUrl12Base</li>
-     <li>cveUrl20Base</li>
-   </ul>
-</li>
-</ol>
+Creating an offline cache for the NVD API
+------------------------------------------------------------
+
+The Open Vulnerability Project's [vuln CLI](https://github.com/jeremylong/Open-Vulnerability-Project/tree/main/vulnz#caching-the-nvd-cve-data)
+can be used to create an offline copy of the data obtained from the NVD API.
+Then configure dependency-check to use the NVD Datafeed URL.
+
+
+Mirroring Retire JS Repository
+------------------------------------------------------------
+The Retire JS Repository is located at:
+
+```
+https://raw.githubusercontent.com/Retirejs/retire.js/master/repository/jsrepository.json
+```
+
+The Retire JS repository can be configured using the `retireJsUrl` configuration option.
+See the configuration for the specific dependency-check client used for more information.

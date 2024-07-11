@@ -50,7 +50,7 @@ public class DependencyCheckScanAgentIT extends BaseDBTestCase {
         scanAgent.execute();
 
         Dependency tomcat = scanAgent.getDependencies().get(0);
-        Assert.assertTrue(tomcat.getIdentifiers().size() >= 1);
+        Assert.assertTrue(tomcat.getVulnerableSoftwareIdentifiers().size() >= 1);
 
         // This will change over time
         Assert.assertTrue(tomcat.getVulnerabilities().size() > 5);
@@ -62,9 +62,10 @@ public class DependencyCheckScanAgentIT extends BaseDBTestCase {
         //the following does not work because it will be over-ridden by the system
         //  properties configured during surefire/failsafe
         //scanAgent.setDataDirectory(DATA_DIR.getAbsolutePath());
+        scanAgent.setCentralAnalyzerEnabled(false);
         scanAgent.setReportOutputDirectory(REPORT_DIR.getAbsolutePath());
         scanAgent.setReportFormat(ReportGenerator.Format.XML);
-        scanAgent.setAutoUpdate(true);
+        scanAgent.setAutoUpdate(false);
         scanAgent.setUpdateOnly(false);
         return scanAgent;
     }

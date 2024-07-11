@@ -17,6 +17,11 @@
  */
 package org.owasp.dependencycheck.data.nodeaudit;
 
+
+
+import io.github.jeremylong.openvulnerability.client.nvd.CvssV3;
+import java.io.Serializable;
+import java.util.List;
 import javax.annotation.concurrent.ThreadSafe;
 
 /**
@@ -26,12 +31,17 @@ import javax.annotation.concurrent.ThreadSafe;
  * @author Steve Springett
  */
 @ThreadSafe
-public class Advisory {
+public class Advisory implements Serializable {
 
     /**
-     * The unique ID of the advisory as issued by NPM.
+     * Serial version UID.
      */
-    private int id;
+    private static final long serialVersionUID = -6157232800626565475L;
+
+    /**
+     * The github_advisory_id of the advisory as issued by GHSA-hosted NPM Audit API.
+     */
+    private String ghsaId;
 
     /**
      * The timestamp of which the advisory was created.
@@ -82,7 +92,7 @@ public class Advisory {
     /**
      * The optional CVE(s) associated with this advisory.
      */
-    private String[] cves;
+    private List<String> cves;
 
     /**
      * A string representation of the versions containing the vulnerability.
@@ -95,7 +105,8 @@ public class Advisory {
     private String patchedVersions;
 
     /**
-     * The references names in the advisory. This field contains MarkDown (including \n, *, and other characters)
+     * The references names in the advisory. This field contains MarkDown
+     * (including \n, *, and other characters)
      */
     private String references;
 
@@ -110,18 +121,14 @@ public class Advisory {
     private String severity;
 
     /**
-     * The CWE of the advisory.
+     * The CWEs of the advisory.
      */
-    private String cwe;
+    private List<String> cwes;
 
-
-    public int getId() {
-        return id;
-    }
-
-    public void setId(int id) {
-        this.id = id;
-    }
+    /**
+     * The CVSSv3 of the advisory.
+     */
+    private CvssV3 cvssV3;
 
     public String getCreated() {
         return created;
@@ -195,11 +202,11 @@ public class Advisory {
         this.version = version;
     }
 
-    public String[] getCves() {
+    public List<String> getCves() {
         return cves;
     }
 
-    public void setCves(String[] cves) {
+    public void setCves(List<String> cves) {
         this.cves = cves;
     }
 
@@ -243,12 +250,27 @@ public class Advisory {
         this.severity = severity;
     }
 
-    public String getCwe() {
-        return cwe;
+    public List<String> getCwes() {
+        return cwes;
     }
 
-    public void setCwe(String cwe) {
-        this.cwe = cwe;
+    public void setCwes(List<String> cwes) {
+        this.cwes = cwes;
     }
 
+    public String getGhsaId() {
+        return ghsaId;
+    }
+
+    public void setGhsaId(String ghsaId) {
+        this.ghsaId = ghsaId;
+    }
+
+    public CvssV3 getCvssV3() {
+        return cvssV3;
+    }
+
+    public void setCvssV3(CvssV3 cvssV3) {
+        this.cvssV3 = cvssV3;
+    }
 }

@@ -17,14 +17,17 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FilenameFilter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Properties;
 import org.apache.commons.io.filefilter.NameFileFilter;
 import org.apache.commons.io.filefilter.SuffixFileFilter;
 import org.apache.commons.lang3.StringUtils;
@@ -32,11 +35,10 @@ import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
+import org.owasp.dependencycheck.utils.PyPACoreMetadataParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.mail.MessagingException;
-import javax.mail.internet.InternetHeaders;
 import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.ExtractionException;
 import org.owasp.dependencycheck.utils.ExtractionUtil;
@@ -46,7 +48,10 @@ import org.owasp.dependencycheck.utils.Settings;
 import org.owasp.dependencycheck.utils.UrlStringUtils;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.annotation.concurrent.ThreadSafe;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
 
 /**
  * Used to analyze a Wheel or egg distribution files, or their contents in
@@ -63,7 +68,7 @@ public class PythonDistributionAnalyzer extends AbstractFileTypeAnalyzer {
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "Python.Dist";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.PYTHON;
 
     /**
      * Name of egg metadata files to analyze.
@@ -189,7 +194,7 @@ public class PythonDistributionAnalyzer extends AbstractFileTypeAnalyzer {
                 final File parent = actualFile.getParentFile();
                 final String parentName = parent.getName();
                 if (parent.isDirectory()
-                        && (metadata && parentName.endsWith(".dist-info")
+                        && ((metadata && parentName.endsWith(".dist-info"))
                         || parentName.endsWith(".egg-info") || "EGG-INFO"
                         .equals(parentName))) {
                     collectWheelMetadata(dependency, actualFile);
@@ -284,29 +289,37 @@ public class PythonDistributionAnalyzer extends AbstractFileTypeAnalyzer {
      * @param dependency the dependency being analyzed
      * @param file a reference to the manifest/properties file
      */
-    private static void collectWheelMetadata(Dependency dependency, File file) {
-        final InternetHeaders headers = getManifestProperties(file);
-        addPropertyToEvidence(dependency, EvidenceType.VERSION, Confidence.HIGHEST, headers, "Version");
+    private static void collectWheelMetadata(Dependency dependency, File file) throws AnalysisException {
+        final Properties headers = PyPACoreMetadataParser.getProperties(file);
+        final String version = addPropertyToEvidence(dependency, EvidenceType.VERSION, Confidence.HIGHEST, headers, "Version");
+        final String name = addPropertyToEvidence(dependency, EvidenceType.VENDOR, Confidence.HIGHEST, headers, "Name");
         addPropertyToEvidence(dependency, EvidenceType.PRODUCT, Confidence.HIGHEST, headers, "Name");
-        addPropertyToEvidence(dependency, EvidenceType.PRODUCT, Confidence.MEDIUM, headers, "Name");
 
-        final String name = headers.getHeader("Name", null);
-        final String version = headers.getHeader("Version", null);
         final String packagePath = String.format("%s:%s", name, version);
         dependency.setName(name);
         dependency.setVersion(version);
         dependency.setPackagePath(packagePath);
         dependency.setDisplayFileName(packagePath);
-        final String url = headers.getHeader("Home-page", null);
+        final String url = headers.getProperty("Home-page", null);
         if (StringUtils.isNotBlank(url)) {
             if (UrlStringUtils.isUrl(url)) {
                 dependency.addEvidence(EvidenceType.VENDOR, METADATA, "vendor", url, Confidence.MEDIUM);
             }
         }
         addPropertyToEvidence(dependency, EvidenceType.VENDOR, Confidence.LOW, headers, "Author");
-        final String summary = headers.getHeader("Summary", null);
+        final String summary = headers.getProperty("Summary", null);
         if (StringUtils.isNotBlank(summary)) {
             JarAnalyzer.addDescription(dependency, summary, METADATA, "summary");
+        }
+
+        try {
+            final PackageURL purl = PackageURLBuilder.aPackageURL().withType("pypi")
+                    .withName(name).withVersion(version).build();
+            dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+        } catch (MalformedPackageURLException ex) {
+            LOGGER.debug("Unable to build package url for python", ex);
+            final GenericIdentifier id = new GenericIdentifier("generic:" + name + "@" + version, Confidence.HIGHEST);
+            dependency.addSoftwareIdentifier(id);
         }
     }
 
@@ -318,14 +331,17 @@ public class PythonDistributionAnalyzer extends AbstractFileTypeAnalyzer {
      * @param confidence the confidence in the evidence being added
      * @param headers the properties collection
      * @param property the property name
+     * @return returns the value of the property if found; otherwise
+     * <code>null</code>
      */
-    private static void addPropertyToEvidence(Dependency dependency, EvidenceType type, Confidence confidence,
-            InternetHeaders headers, String property) {
-        final String value = headers.getHeader(property, null);
+    private static String addPropertyToEvidence(Dependency dependency, EvidenceType type, Confidence confidence,
+            Properties headers, String property) {
+        final String value = headers.getProperty(property, null);
         LOGGER.debug("Property: {}, Value: {}", property, value);
         if (StringUtils.isNotBlank(value)) {
             dependency.addEvidence(type, METADATA, property, value, confidence);
         }
+        return value;
     }
 
     /**
@@ -351,20 +367,18 @@ public class PythonDistributionAnalyzer extends AbstractFileTypeAnalyzer {
      * @param manifest the manifest
      * @return the manifest entries
      */
-    private static InternetHeaders getManifestProperties(File manifest) {
-        final InternetHeaders result = new InternetHeaders();
+    private static Properties getManifestProperties(File manifest) {
+        final Properties prop = new Properties();
         if (null == manifest) {
             LOGGER.debug("Manifest file not found.");
         } else {
             try (InputStream in = new BufferedInputStream(new FileInputStream(manifest))) {
-                result.load(in);
-            } catch (MessagingException | FileNotFoundException e) {
+                prop.load(in);
+            } catch (IOException e) {
                 LOGGER.warn(e.getMessage(), e);
-            } catch (IOException ex) {
-                LOGGER.warn(ex.getMessage(), ex);
             }
         }
-        return result;
+        return prop;
     }
 
     /**

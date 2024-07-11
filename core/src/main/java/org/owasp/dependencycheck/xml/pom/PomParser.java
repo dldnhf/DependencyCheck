@@ -19,7 +19,6 @@ package org.owasp.dependencycheck.xml.pom;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -54,7 +53,8 @@ public class PomParser {
 
     /**
      * Parses the given xml file and returns a Model object containing only the
-     * fields dependency-check requires.
+     * fields dependency-check requires. An attempt is made to remove any
+     * doctype definitions.
      *
      * @param file a pom.xml
      * @return a Model object containing only the fields dependency-check
@@ -65,14 +65,40 @@ public class PomParser {
         try (FileInputStream fis = new FileInputStream(file)) {
             return parse(fis);
         } catch (IOException ex) {
+            if (ex instanceof PomParseException) {
+                throw (PomParseException) ex;
+            }
             LOGGER.debug("", ex);
-            throw new PomParseException(String.format("Unable to parse pom '%s'", file.toString()), ex);
+            throw new PomParseException(String.format("Unable to parse pom '%s'", file), ex);
+        }
+    }
+
+    /**
+     * Parses the given xml file and returns a Model object containing only the
+     * fields dependency-check requires. No attempt is made to remove doctype
+     * definitions.
+     *
+     * @param file a pom.xml
+     * @return a Model object containing only the fields dependency-check
+     * requires
+     * @throws PomParseException thrown if the xml file cannot be parsed
+     */
+    public Model parseWithoutDocTypeCleanup(File file) throws PomParseException {
+        try (FileInputStream fis = new FileInputStream(file)) {
+            return parseWithoutDocTypeCleanup(fis);
+        } catch (IOException ex) {
+            if (ex instanceof PomParseException) {
+                throw (PomParseException) ex;
+            }
+            LOGGER.debug("", ex);
+            throw new PomParseException(String.format("Unable to parse pom '%s'", file), ex);
         }
     }
 
     /**
      * Parses the given XML file and returns a Model object containing only the
-     * fields dependency-check requires.
+     * fields dependency-check requires. An attempt is made to remove any
+     * doctype definitions.
      *
      * @param inputStream an InputStream containing suppression rues
      * @return a list of suppression rules
@@ -93,10 +119,37 @@ public class PomParser {
             final InputSource in = new InputSource(reader);
             xmlReader.parse(in);
             return handler.getModel();
-        } catch (ParserConfigurationException | SAXException | FileNotFoundException ex) {
+        } catch (ParserConfigurationException | SAXException | IOException ex) {
             LOGGER.debug("", ex);
             throw new PomParseException(ex);
-        } catch (IOException ex) {
+        }
+    }
+
+    /**
+     * Parses the given XML file and returns a Model object containing only the
+     * fields dependency-check requires. No attempt is made to remove doctype
+     * definitions.
+     *
+     * @param inputStream an InputStream containing suppression rues
+     * @return a list of suppression rules
+     * @throws PomParseException if the XML cannot be parsed
+     */
+    public Model parseWithoutDocTypeCleanup(InputStream inputStream) throws PomParseException {
+        try {
+            final PomHandler handler = new PomHandler();
+            final SAXParser saxParser = XmlUtils.buildSecureSaxParser();
+            final XMLReader xmlReader = saxParser.getXMLReader();
+            xmlReader.setContentHandler(handler);
+
+            final BOMInputStream bomStream = new BOMInputStream(new XmlInputStream(inputStream));
+            final ByteOrderMark bom = bomStream.getBOM();
+            final String defaultEncoding = StandardCharsets.UTF_8.name();
+            final String charsetName = bom == null ? defaultEncoding : bom.getCharsetName();
+            final Reader reader = new InputStreamReader(bomStream, charsetName);
+            final InputSource in = new InputSource(reader);
+            xmlReader.parse(in);
+            return handler.getModel();
+        } catch (ParserConfigurationException | SAXException | IOException ex) {
             LOGGER.debug("", ex);
             throw new PomParseException(ex);
         }

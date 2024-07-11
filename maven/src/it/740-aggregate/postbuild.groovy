@@ -16,17 +16,18 @@
  * Copyright (c) 2014 Jeremy Long. All Rights Reserved.
  */
 
-import java.nio.charset.Charset;
-import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang.StringUtils
 
-String report = FileUtils.readFileToString(new File(basedir, "target/dependency-check-report.xml"), Charset.defaultCharset().name());
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files;
+
+String report = new File(basedir, "target/dependency-check-report.xml").text
 int count = StringUtils.countMatches(report, "org.owasp.test.aggregate:fourth:1.0.0-SNAPSHOT");
 if (count == 0) {
     System.out.println(String.format("fourth-1.0.0-SNAPSHOT was not identified"));
     return false;
 }
-count = StringUtils.countMatches(report, "org.apache.james:apache-mime4j-core:0.7.2");
+count = StringUtils.countMatches(report, "pkg:maven/org.apache.james/apache-mime4j-core@0.7.2");
 if (count == 0) {
     System.out.println("org.apache.james:apache-mime4j-core:0.7.2 was not identified and is a dependency of fourth-1.0.0-SNAPSHOT");
     return false;

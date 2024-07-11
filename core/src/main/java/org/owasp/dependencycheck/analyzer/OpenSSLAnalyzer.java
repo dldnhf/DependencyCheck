@@ -17,23 +17,30 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import org.apache.commons.io.FileUtils;
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
+import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
+import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.Settings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import javax.annotation.concurrent.ThreadSafe;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import javax.annotation.concurrent.ThreadSafe;
-import org.owasp.dependencycheck.dependency.EvidenceType;
-import org.owasp.dependencycheck.exception.InitializationException;
 
 /**
  * Used to analyze OpenSSL source code present in the file system.
@@ -43,6 +50,10 @@ import org.owasp.dependencycheck.exception.InitializationException;
 @ThreadSafe
 public class OpenSSLAnalyzer extends AbstractFileTypeAnalyzer {
 
+    /**
+     * The logger.
+     */
+    private static final Logger LOGGER = LoggerFactory.getLogger(OpenSSLAnalyzer.class);
     /**
      * Hexadecimal.
      */
@@ -61,7 +72,7 @@ public class OpenSSLAnalyzer extends AbstractFileTypeAnalyzer {
      */
     private static final Pattern VERSION_PATTERN = Pattern.compile(
             "define\\s+OPENSSL_VERSION_NUMBER\\s+0x([0-9a-zA-Z]{8})L", Pattern.DOTALL
-            | Pattern.CASE_INSENSITIVE);
+                    | Pattern.CASE_INSENSITIVE);
     /**
      * The offset of the major version number.
      */
@@ -185,9 +196,20 @@ public class OpenSSLAnalyzer extends AbstractFileTypeAnalyzer {
         if (!contents.isEmpty()) {
             final Matcher matcher = VERSION_PATTERN.matcher(contents);
             if (matcher.find()) {
-                dependency.addEvidence(EvidenceType.VERSION, OPENSSLV_H, "Version Constant",
-                        getOpenSSLVersion(Long.parseLong(matcher.group(1), HEXADECIMAL)), Confidence.HIGH);
                 found = true;
+                final String version = getOpenSSLVersion(Long.parseLong(matcher.group(1), HEXADECIMAL));
+                dependency.addEvidence(EvidenceType.VERSION, OPENSSLV_H, "Version Constant",
+                        version, Confidence.HIGH);
+                try {
+                    final PackageURL purl = PackageURLBuilder.aPackageURL().withType("generic")
+                            .withName("openssl").withVersion(version).build();
+                    dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+                } catch (MalformedPackageURLException ex) {
+                    LOGGER.debug("Unable to build package url for openssl", ex);
+                    final GenericIdentifier id = new GenericIdentifier("generic:openssl@" + version, Confidence.HIGHEST);
+                    dependency.addSoftwareIdentifier(id);
+                }
+
             }
         }
         if (found) {
@@ -209,7 +231,7 @@ public class OpenSSLAnalyzer extends AbstractFileTypeAnalyzer {
     private String getFileContents(final File actualFile)
             throws AnalysisException {
         try {
-            return FileUtils.readFileToString(actualFile, Charset.defaultCharset()).trim();
+            return new String(Files.readAllBytes(actualFile.toPath()), StandardCharsets.UTF_8).trim();
         } catch (IOException e) {
             throw new AnalysisException(
                     "Problem occurred while reading dependency file.", e);

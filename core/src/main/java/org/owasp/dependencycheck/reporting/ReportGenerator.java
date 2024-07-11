@@ -17,11 +17,42 @@
  */
 package org.owasp.dependencycheck.reporting;
 
-import java.util.List;
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonParser;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.text.WordUtils;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
+import org.apache.velocity.context.Context;
+import org.owasp.dependencycheck.analyzer.Analyzer;
+import org.owasp.dependencycheck.data.nvdcve.DatabaseProperties;
+import org.owasp.dependencycheck.dependency.Dependency;
+import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.exception.ExceptionCollection;
+import org.owasp.dependencycheck.exception.ReportException;
+import org.owasp.dependencycheck.utils.Checksum;
+import org.owasp.dependencycheck.utils.FileUtils;
+import org.owasp.dependencycheck.utils.Settings;
+import org.owasp.dependencycheck.utils.XmlUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
+import org.xml.sax.XMLReader;
 
-import com.google.gson.stream.JsonReader;
-import com.google.gson.stream.JsonToken;
-import com.google.gson.stream.JsonWriter;
+import javax.annotation.concurrent.NotThreadSafe;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.ParserConfigurationException;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerConfigurationException;
+import javax.xml.transform.TransformerException;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.sax.SAXSource;
+import javax.xml.transform.sax.SAXTransformerFactory;
+import javax.xml.transform.stream.StreamResult;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -32,26 +63,11 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.UnsupportedEncodingException;
-import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import javax.annotation.concurrent.NotThreadSafe;
-import org.apache.commons.text.WordUtils;
-import org.apache.velocity.VelocityContext;
-import org.apache.velocity.app.VelocityEngine;
-import org.apache.velocity.context.Context;
-import org.apache.velocity.runtime.RuntimeConstants;
-import org.joda.time.DateTime;
-import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.DateTimeFormatter;
-import org.owasp.dependencycheck.analyzer.Analyzer;
-import org.owasp.dependencycheck.data.nvdcve.DatabaseProperties;
-import org.owasp.dependencycheck.dependency.Dependency;
-import org.owasp.dependencycheck.dependency.EvidenceType;
-import org.owasp.dependencycheck.exception.ReportException;
-import org.owasp.dependencycheck.utils.FileUtils;
-import org.owasp.dependencycheck.utils.Settings;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import java.nio.file.Files;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 /**
  * The ReportGenerator is used to, as the name implies, generate reports.
@@ -87,18 +103,35 @@ public class ReportGenerator {
          */
         HTML,
         /**
-         * Generate HTML Vulnerability report.
-         */
-        VULN,
-        /**
          * Generate JSON report.
          */
         JSON,
         /**
          * Generate CSV report.
          */
-        CSV
+        CSV,
+        /**
+         * Generate Sarif report.
+         */
+        SARIF,
+        /**
+         * Generate HTML report without script or non-vulnerable libraries for
+         * Jenkins.
+         */
+        JENKINS,
+        /**
+         * Generate JUNIT report.
+         */
+        JUNIT,
+        /**
+         * Generate Report in GitLab dependency check format:
+         *
+         * @see <a href="https://gitlab.com/gitlab-org/security-products/security-report-schemas/-/blob/master/dist/dependency-scanning-report-format.json">format definition</a>
+         * @see <a href="https://docs.gitlab.com/ee/development/integrations/secure.html">additional explantions on the format</a>
+         */
+        GITLAB
     }
+
     /**
      * The Velocity Engine.
      */
@@ -112,6 +145,9 @@ public class ReportGenerator {
      */
     private final Settings settings;
 
+    //CSOFF: ParameterNumber
+    //CSOFF: LineLength
+
     /**
      * Constructs a new ReportGenerator.
      *
@@ -121,13 +157,31 @@ public class ReportGenerator {
      * @param properties the database properties (containing timestamps of the
      * NVD CVE data)
      * @param settings a reference to the database settings
+     * @deprecated Please use
+     * {@link #ReportGenerator(java.lang.String, java.util.List, java.util.List, DatabaseProperties, Settings, ExceptionCollection)}
+     */
+    @Deprecated
+    public ReportGenerator(String applicationName, List<Dependency> dependencies, List<Analyzer> analyzers,
+                           DatabaseProperties properties, Settings settings) {
+        this(applicationName, dependencies, analyzers, properties, settings, null);
+    }
+
+    /**
+     * Constructs a new ReportGenerator.
+     *
+     * @param applicationName the application name being analyzed
+     * @param dependencies the list of dependencies
+     * @param analyzers the list of analyzers used
+     * @param properties the database properties (containing timestamps of the
+     * NVD CVE data)
+     * @param settings a reference to the database settings
+     * @param exceptions a collection of exceptions that may have occurred
+     * during the analysis
+     * @since 5.1.0
      */
     public ReportGenerator(String applicationName, List<Dependency> dependencies, List<Analyzer> analyzers,
-            DatabaseProperties properties, Settings settings) {
-        this.settings = settings;
-        velocityEngine = createVelocityEngine();
-        velocityEngine.init();
-        context = createContext(applicationName, dependencies, analyzers, properties);
+                           DatabaseProperties properties, Settings settings, ExceptionCollection exceptions) {
+        this(applicationName, null, null, null, dependencies, analyzers, properties, settings, exceptions);
     }
 
     /**
@@ -142,33 +196,40 @@ public class ReportGenerator {
      * @param properties the database properties (containing timestamps of the
      * NVD CVE data)
      * @param settings a reference to the database settings
+     * @deprecated Please use
+     * {@link #ReportGenerator(String, String, String, String, List, List, DatabaseProperties, Settings, ExceptionCollection)}
      */
-    //CSOFF: ParameterNumber
+    @Deprecated
     public ReportGenerator(String applicationName, String groupID, String artifactID, String version,
-            List<Dependency> dependencies, List<Analyzer> analyzers, DatabaseProperties properties, Settings settings) {
-        this(applicationName, dependencies, analyzers, properties, settings);
-        if (version != null) {
-            context.put("applicationVersion", version);
-        }
-        if (artifactID != null) {
-            context.put("artifactID", artifactID);
-        }
-        if (groupID != null) {
-            context.put("groupID", groupID);
-        }
+                           List<Dependency> dependencies, List<Analyzer> analyzers, DatabaseProperties properties,
+                           Settings settings) {
+        this(applicationName, groupID, artifactID, version, dependencies, analyzers, properties, settings, null);
     }
-    //CSON: ParameterNumber
 
     /**
-     * Creates a new Velocity Engine.
+     * Constructs a new ReportGenerator.
      *
-     * @return a velocity engine
+     * @param applicationName the application name being analyzed
+     * @param groupID the group id of the project being analyzed
+     * @param artifactID the application id of the project being analyzed
+     * @param version the application version of the project being analyzed
+     * @param dependencies the list of dependencies
+     * @param analyzers the list of analyzers used
+     * @param properties the database properties (containing timestamps of the
+     * NVD CVE data)
+     * @param settings a reference to the database settings
+     * @param exceptions a collection of exceptions that may have occurred
+     * during the analysis
+     * @since 5.1.0
      */
-    private VelocityEngine createVelocityEngine() {
-        final VelocityEngine velocity = new VelocityEngine();
-        // Logging redirection for Velocity - Required by Jenkins and other server applications
-        velocity.setProperty(RuntimeConstants.RUNTIME_LOG_LOGSYSTEM_CLASS, VelocityLoggerRedirect.class.getName());
-        return velocity;
+    public ReportGenerator(String applicationName, String groupID, String artifactID, String version,
+                           List<Dependency> dependencies, List<Analyzer> analyzers, DatabaseProperties properties,
+                           Settings settings, ExceptionCollection exceptions) {
+        this.settings = settings;
+        velocityEngine = createVelocityEngine();
+        velocityEngine.init();
+        context = createContext(applicationName, dependencies, analyzers, properties, groupID,
+                artifactID, version, exceptions);
     }
 
     /**
@@ -176,44 +237,80 @@ public class ReportGenerator {
      * reports.
      *
      * @param applicationName the application name being analyzed
+     * @param groupID the group id of the project being analyzed
+     * @param artifactID the application id of the project being analyzed
+     * @param version the application version of the project being analyzed
      * @param dependencies the list of dependencies
      * @param analyzers the list of analyzers used
      * @param properties the database properties (containing timestamps of the
      * NVD CVE data)
+     * @param exceptions a collection of exceptions that may have occurred
+     * during the analysis
      * @return the velocity context
      */
+    @SuppressWarnings("JavaTimeDefaultTimeZone")
     private VelocityContext createContext(String applicationName, List<Dependency> dependencies,
-            List<Analyzer> analyzers, DatabaseProperties properties) {
-        final DateTime dt = new DateTime();
-        final DateTimeFormatter dateFormat = DateTimeFormat.forPattern("MMM d, yyyy 'at' HH:mm:ss z");
-        final DateTimeFormatter dateFormatXML = DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+                                          List<Analyzer> analyzers, DatabaseProperties properties, String groupID,
+                                          String artifactID, String version, ExceptionCollection exceptions) {
 
-        final String scanDate = dateFormat.print(dt);
-        final String scanDateXML = dateFormatXML.print(dt);
+        final ZonedDateTime dt = ZonedDateTime.now();
+        final String scanDate = DateTimeFormatter.RFC_1123_DATE_TIME.format(dt);
+        final String scanDateXML = DateTimeFormatter.ISO_INSTANT.format(dt);
+        final String scanDateJunit = DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(dt);
+        final String scanDateGitLab = DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(dt.withNano(0));
 
         final VelocityContext ctxt = new VelocityContext();
         ctxt.put("applicationName", applicationName);
+        dependencies.sort(Dependency.NAME_COMPARATOR);
         ctxt.put("dependencies", dependencies);
         ctxt.put("analyzers", analyzers);
         ctxt.put("properties", properties);
         ctxt.put("scanDate", scanDate);
         ctxt.put("scanDateXML", scanDateXML);
+        ctxt.put("scanDateJunit", scanDateJunit);
+        ctxt.put("scanDateGitLab", scanDateGitLab);
         ctxt.put("enc", new EscapeTool());
+        ctxt.put("rpt", new ReportTool());
+        ctxt.put("checksum", Checksum.class);
         ctxt.put("WordUtils", new WordUtils());
         ctxt.put("VENDOR", EvidenceType.VENDOR);
         ctxt.put("PRODUCT", EvidenceType.PRODUCT);
         ctxt.put("VERSION", EvidenceType.VERSION);
         ctxt.put("version", settings.getString(Settings.KEYS.APPLICATION_VERSION, "Unknown"));
+        ctxt.put("settings", settings);
+        if (version != null) {
+            ctxt.put("applicationVersion", version);
+        }
+        if (artifactID != null) {
+            ctxt.put("artifactID", artifactID);
+        }
+        if (groupID != null) {
+            ctxt.put("groupID", groupID);
+        }
+        if (exceptions != null) {
+            ctxt.put("exceptions", exceptions.getExceptions());
+        }
         return ctxt;
+    }
+    //CSON: ParameterNumber
+    //CSON: LineLength
+
+    /**
+     * Creates a new Velocity Engine.
+     *
+     * @return a velocity engine
+     */
+    private VelocityEngine createVelocityEngine() {
+        return new VelocityEngine();
     }
 
     /**
      * Writes the dependency-check report to the given output location.
      *
      * @param outputLocation the path where the reports should be written
-     * @param format the format the report should be written in (XML, HTML,
-     * JSON, CSV, ALL) or even the path to a custom velocity template (either
-     * fully qualified or the template name on the class path).
+     * @param format the format the report should be written in (a valid member
+     * of {@link Format}) or even the path to a custom velocity template
+     * (either fully qualified or the template name on the class path).
      * @throws ReportException is thrown if there is an error creating out the
      * reports
      */
@@ -228,10 +325,12 @@ public class ReportGenerator {
         if (reportFormat != null) {
             write(outputLocation, reportFormat);
         } else {
-            final File out = getReportFile(outputLocation, null);
+            File out = getReportFile(outputLocation, null);
             if (out.isDirectory()) {
-                throw new ReportException("Unable to write non-standard VSL output to a directory, please specify a file name");
+                out = new File(out, FilenameUtils.getBaseName(format));
+                LOGGER.warn("Writing non-standard VSL output to a directory using template name as file name.");
             }
+            LOGGER.info("Writing custom report to: {}", out.getAbsolutePath());
             processTemplate(format, out);
         }
 
@@ -241,7 +340,8 @@ public class ReportGenerator {
      * Writes the dependency-check report(s).
      *
      * @param outputLocation the path where the reports should be written
-     * @param format the format the report should be written in (XML, HTML, ALL)
+     * @param format the format the report should be written in (see
+     * {@link Format})
      * @throws ReportException is thrown if there is an error creating out the
      * reports
      */
@@ -255,9 +355,14 @@ public class ReportGenerator {
         } else {
             final File out = getReportFile(outputLocation, format);
             final String templateName = format.toString().toLowerCase() + "Report";
+            LOGGER.info("Writing {} report to: {}", format, out.getAbsolutePath());
             processTemplate(templateName, out);
-            if (format == Format.JSON) {
-                pretifyJson(out.getPath());
+            if (settings.getBoolean(Settings.KEYS.PRETTY_PRINT, false)) {
+                if (format == Format.JSON || format == Format.SARIF) {
+                    pretifyJson(out.getPath());
+                } else if (format == Format.XML || format == Format.JUNIT) {
+                    pretifyXml(out.getPath());
+                }
             }
         }
     }
@@ -273,7 +378,7 @@ public class ReportGenerator {
      * @param format the report format
      * @return the report File
      */
-    protected File getReportFile(String outputLocation, Format format) {
+    public static File getReportFile(String outputLocation, Format format) {
         File outFile = new File(outputLocation);
         if (outFile.getParentFile() == null) {
             outFile = new File(".", outputLocation);
@@ -285,14 +390,23 @@ public class ReportGenerator {
         if (format == Format.HTML && !pathToCheck.endsWith(".html") && !pathToCheck.endsWith(".htm")) {
             return new File(outFile, "dependency-check-report.html");
         }
-        if (format == Format.VULN && !pathToCheck.endsWith(".html") && !pathToCheck.endsWith(".htm")) {
-            return new File(outFile, "dependency-check-vulnerability.html");
+        if (format == Format.JENKINS && !pathToCheck.endsWith(".html") && !pathToCheck.endsWith(".htm")) {
+            return new File(outFile, "dependency-check-jenkins.html");
         }
         if (format == Format.JSON && !pathToCheck.endsWith(".json")) {
             return new File(outFile, "dependency-check-report.json");
         }
         if (format == Format.CSV && !pathToCheck.endsWith(".csv")) {
             return new File(outFile, "dependency-check-report.csv");
+        }
+        if (format == Format.JUNIT && !pathToCheck.endsWith(".xml")) {
+            return new File(outFile, "dependency-check-junit.xml");
+        }
+        if (format == Format.SARIF && !pathToCheck.endsWith(".sarif")) {
+            return new File(outFile, "dependency-check-report.sarif");
+        }
+        if (format == Format.GITLAB && !pathToCheck.endsWith(".json")) {
+            return new File(outFile, "dependency-check-gitlab.json");
         }
         return outFile;
     }
@@ -307,6 +421,7 @@ public class ReportGenerator {
      * @param file the output file to write the report to
      * @throws ReportException is thrown when the report cannot be generated
      */
+    @SuppressFBWarnings(justification = "try with resources will clean up the output stream", value = {"OBL_UNSATISFIED_OBLIGATION"})
     protected void processTemplate(String template, File file) throws ReportException {
         ensureParentDirectoryExists(file);
         try (OutputStream output = new FileOutputStream(file)) {
@@ -328,7 +443,7 @@ public class ReportGenerator {
      */
     protected void processTemplate(String templateName, OutputStream outputStream) throws ReportException {
         InputStream input = null;
-        String logTag = null;
+        String logTag;
         final File f = new File(templateName);
         try {
             if (f.isFile()) {
@@ -351,16 +466,16 @@ public class ReportGenerator {
             }
 
             try (InputStreamReader reader = new InputStreamReader(input, StandardCharsets.UTF_8);
-                    OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
+                 OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
                 if (!velocityEngine.evaluate(context, writer, logTag, reader)) {
                     throw new ReportException("Failed to convert the template into html.");
                 }
                 writer.flush();
             } catch (UnsupportedEncodingException ex) {
                 throw new ReportException("Unable to generate the report using UTF-8", ex);
-            } catch (IOException ex) {
-                throw new ReportException("Unable to write the report", ex);
             }
+        } catch (IOException ex) {
+            throw new ReportException("Unable to write the report", ex);
         } finally {
             if (input != null) {
                 try {
@@ -392,87 +507,88 @@ public class ReportGenerator {
     }
 
     /**
+     * Reformats the given XML file.
+     *
+     * @param path the path to the XML file to be reformatted
+     * @throws ReportException thrown if the given JSON file is malformed
+     */
+    private void pretifyXml(String path) throws ReportException {
+        final String outputPath = path + ".pretty";
+        final File in = new File(path);
+        final File out = new File(outputPath);
+        try (OutputStream os = new FileOutputStream(out)) {
+            final TransformerFactory transformerFactory = SAXTransformerFactory.newInstance();
+            transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+            final Transformer transformer = transformerFactory.newTransformer();
+            transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+            transformer.setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2");
+
+            final SAXSource saxs = new SAXSource(new InputSource(path));
+            final XMLReader saxReader = XmlUtils.buildSecureSaxParser().getXMLReader();
+
+            saxs.setXMLReader(saxReader);
+            transformer.transform(saxs, new StreamResult(new OutputStreamWriter(os, StandardCharsets.UTF_8)));
+        } catch (ParserConfigurationException | TransformerConfigurationException ex) {
+            LOGGER.debug("Configuration exception when pretty printing", ex);
+            LOGGER.error("Unable to generate pretty report, caused by: {}", ex.getMessage());
+        } catch (TransformerException | SAXException | IOException ex) {
+            LOGGER.debug("Malformed XML?", ex);
+            LOGGER.error("Unable to generate pretty report, caused by: {}", ex.getMessage());
+        }
+        if (out.isFile() && in.isFile() && in.delete()) {
+            try {
+                Thread.sleep(1000);
+                Files.move(out.toPath(), in.toPath());
+            } catch (IOException ex) {
+                LOGGER.error("Unable to generate pretty report, caused by: {}", ex.getMessage());
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                LOGGER.error("Unable to generate pretty report, caused by: {}", ex.getMessage());
+            }
+        }
+    }
+
+    /**
      * Reformats the given JSON file.
      *
      * @param pathToJson the path to the JSON file to be reformatted
      * @throws ReportException thrown if the given JSON file is malformed
      */
     private void pretifyJson(String pathToJson) throws ReportException {
+        LOGGER.debug("pretify json: {}", pathToJson);
         final String outputPath = pathToJson + ".pretty";
         final File in = new File(pathToJson);
         final File out = new File(outputPath);
-        try (JsonReader reader = new JsonReader(new InputStreamReader(new FileInputStream(in), StandardCharsets.UTF_8));
-                JsonWriter writer = new JsonWriter(new OutputStreamWriter(new FileOutputStream(out), StandardCharsets.UTF_8))) {
-            prettyPrint(reader, writer);
+
+        final JsonFactory factory = new JsonFactory();
+
+        try (InputStream is = new FileInputStream(in); OutputStream os = new FileOutputStream(out)) {
+
+            final JsonParser parser = factory.createParser(is);
+            final JsonGenerator generator = factory.createGenerator(os);
+
+            generator.useDefaultPrettyPrinter();
+
+            while (parser.nextToken() != null) {
+                generator.copyCurrentEvent(parser);
+            }
+            generator.flush();
         } catch (IOException ex) {
             LOGGER.debug("Malformed JSON?", ex);
             throw new ReportException("Unable to generate json report", ex);
         }
         if (out.isFile() && in.isFile() && in.delete()) {
             try {
-                org.apache.commons.io.FileUtils.moveFile(out, in);
+                Thread.sleep(1000);
+                Files.move(out.toPath(), in.toPath());
             } catch (IOException ex) {
-                LOGGER.error("Unable to generate pretty report, caused by: ", ex.getMessage());
+                LOGGER.error("Unable to generate pretty report, caused by: {}", ex.getMessage());
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                LOGGER.error("Unable to generate pretty report, caused by: {}", ex.getMessage());
             }
         }
     }
 
-    /**
-     * Streams from a json reader to a json writer and performs pretty printing.
-     *
-     * This function is copied from https://sites.google.com/site/gson/streaming
-     *
-     * @param reader json reader
-     * @param writer json writer
-     * @throws IOException thrown if the json is malformed
-     */
-    private static void prettyPrint(JsonReader reader, JsonWriter writer) throws IOException {
-        writer.setIndent("  ");
-        while (true) {
-            final JsonToken token = reader.peek();
-            switch (token) {
-                case BEGIN_ARRAY:
-                    reader.beginArray();
-                    writer.beginArray();
-                    break;
-                case END_ARRAY:
-                    reader.endArray();
-                    writer.endArray();
-                    break;
-                case BEGIN_OBJECT:
-                    reader.beginObject();
-                    writer.beginObject();
-                    break;
-                case END_OBJECT:
-                    reader.endObject();
-                    writer.endObject();
-                    break;
-                case NAME:
-                    final String name = reader.nextName();
-                    writer.name(name);
-                    break;
-                case STRING:
-                    final String s = reader.nextString();
-                    writer.value(s);
-                    break;
-                case NUMBER:
-                    final String n = reader.nextString();
-                    writer.value(new BigDecimal(n));
-                    break;
-                case BOOLEAN:
-                    final boolean b = reader.nextBoolean();
-                    writer.value(b);
-                    break;
-                case NULL:
-                    reader.nextNull();
-                    writer.nullValue();
-                    break;
-                case END_DOCUMENT:
-                    return;
-                default:
-                    LOGGER.debug("Unexpected JSON toekn {}", token.toString());
-                    break;
-            }
-        }
-    }
 }

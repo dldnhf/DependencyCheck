@@ -17,6 +17,17 @@
  */
 package org.owasp.dependencycheck.utils;
 
+import org.apache.commons.compress.archivers.ArchiveEntry;
+import org.apache.commons.compress.archivers.ArchiveInputStream;
+import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
+import org.apache.commons.io.IOUtils;
+import org.owasp.dependencycheck.Engine;
+import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.analyzer.exception.ArchiveExtractionException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.concurrent.ThreadSafe;
 import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -24,20 +35,10 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FilenameFilter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
-import javax.annotation.concurrent.ThreadSafe;
-
-import org.apache.commons.compress.archivers.ArchiveEntry;
-import org.apache.commons.compress.archivers.ArchiveInputStream;
-import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
-import org.apache.commons.compress.utils.IOUtils;
-import org.owasp.dependencycheck.Engine;
-import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
-import org.owasp.dependencycheck.analyzer.exception.ArchiveExtractionException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Set of utilities to extract files from archives.
@@ -140,6 +141,64 @@ public final class ExtractionUtil {
     }
 
     /**
+     * Extracts the contents of an archive into the specified directory. The
+     * files are only extracted if they are supported by the analyzers loaded
+     * into the specified engine. If the engine is specified as null then all
+     * files are extracted.
+     *
+     * @param archive an archive file such as a WAR or EAR
+     * @param extractTo a directory to extract the contents to
+     * @throws ExtractionException thrown if there is an error extracting the
+     * files
+     */
+    public static void extractFiles(InputStream archive, File extractTo) throws ExtractionException {
+        if (archive == null || extractTo == null) {
+            return;
+        }
+        final String destPath;
+        try {
+            destPath = extractTo.getCanonicalPath();
+        } catch (IOException ex) {
+            throw new ExtractionException("Unable to extract files to destination path", ex);
+        }
+        ZipEntry entry;
+        try (BufferedInputStream bis = new BufferedInputStream(archive);
+                ZipInputStream zis = new ZipInputStream(bis)) {
+            while ((entry = zis.getNextEntry()) != null) {
+                if (entry.isDirectory()) {
+                    final File d = new File(extractTo, entry.getName());
+                    if (!d.getCanonicalPath().startsWith(destPath)) {
+                        throw new ExtractionException("Archive contains a path that would be extracted outside of the target directory.");
+                    }
+                    if (!d.exists() && !d.mkdirs()) {
+                        final String msg = String.format("Unable to create '%s'.", d.getAbsolutePath());
+                        throw new ExtractionException(msg);
+                    }
+                } else {
+                    final File file = new File(extractTo, entry.getName());
+                    if (!file.getCanonicalPath().startsWith(destPath)) {
+                        LOGGER.debug("ZipSlip detected\n-Destination: " + destPath + "\n-Path: " + file);
+                        throw new ExtractionException("Archive contains a file that would be extracted outside of the target directory.");
+                    }
+                    try (FileOutputStream fos = new FileOutputStream(file)) {
+                        IOUtils.copy(zis, fos);
+                    } catch (FileNotFoundException ex) {
+                        LOGGER.debug("", ex);
+                        final String msg = String.format("Unable to find file '%s'.", file.getName());
+                        throw new ExtractionException(msg, ex);
+                    } catch (IOException ex) {
+                        LOGGER.debug("", ex);
+                        final String msg = String.format("IO Exception while parsing file '%s'.", file.getName());
+                        throw new ExtractionException(msg, ex);
+                    }
+                }
+            }
+        } catch (IOException ex) {
+            throw new ExtractionException("Exception reading archive", ex);
+        }
+    }
+
+    /**
      * Extracts the contents of an archive into the specified directory.
      *
      * @param archive an archive file such as a WAR or EAR
@@ -225,6 +284,7 @@ public final class ExtractionUtil {
             if (filter.accept(file.getParentFile(), file.getName())) {
                 final String destPath = destination.getCanonicalPath();
                 if (!file.getCanonicalPath().startsWith(destPath)) {
+                    LOGGER.debug("ZipSlip detected\n-Destination: " + destPath + "\n-Path: " + file);
                     final String msg = String.format(
                             "Archive contains a file (%s) that would be extracted outside of the target directory.",
                             file.getAbsolutePath());
@@ -278,7 +338,7 @@ public final class ExtractionUtil {
         final String originalPath = file.getPath();
         final File gzip = new File(originalPath + ".gz");
         if (gzip.isFile() && !gzip.delete()) {
-            LOGGER.debug("Failed to delete initial temporary file when extracting 'gz' {}", gzip.toString());
+            LOGGER.debug("Failed to delete initial temporary file when extracting 'gz' {}", gzip);
             gzip.deleteOnExit();
         }
         if (!file.renameTo(gzip)) {
@@ -290,8 +350,8 @@ public final class ExtractionUtil {
                 FileOutputStream out = new FileOutputStream(newFile)) {
             IOUtils.copy(cin, out);
         } finally {
-            if (gzip.isFile() && !org.apache.commons.io.FileUtils.deleteQuietly(gzip)) {
-                LOGGER.debug("Failed to delete temporary file when extracting 'gz' {}", gzip.toString());
+            if (gzip.isFile() && !FileUtils.delete(gzip)) {
+                LOGGER.debug("Failed to delete temporary file when extracting 'gz' {}", gzip);
                 gzip.deleteOnExit();
             }
         }
@@ -309,7 +369,7 @@ public final class ExtractionUtil {
         final String originalPath = file.getPath();
         final File zip = new File(originalPath + ".zip");
         if (zip.isFile() && !zip.delete()) {
-            LOGGER.debug("Failed to delete initial temporary file when extracting 'zip' {}", zip.toString());
+            LOGGER.debug("Failed to delete initial temporary file when extracting 'zip' {}", zip);
             zip.deleteOnExit();
         }
         if (!file.renameTo(zip)) {
@@ -317,13 +377,13 @@ public final class ExtractionUtil {
         }
         final File newFile = new File(originalPath);
         try (FileInputStream fis = new FileInputStream(zip);
-             ZipInputStream cin = new ZipInputStream(fis);
-             FileOutputStream out = new FileOutputStream(newFile)) {
+                ZipInputStream cin = new ZipInputStream(fis);
+                FileOutputStream out = new FileOutputStream(newFile)) {
             cin.getNextEntry();
             IOUtils.copy(cin, out);
         } finally {
-            if (zip.isFile() && !org.apache.commons.io.FileUtils.deleteQuietly(zip)) {
-                LOGGER.debug("Failed to delete temporary file when extracting 'zip' {}", zip.toString());
+            if (zip.isFile() && !FileUtils.delete(zip)) {
+                LOGGER.debug("Failed to delete temporary file when extracting 'zip' {}", zip);
                 zip.deleteOnExit();
             }
         }

@@ -21,7 +21,7 @@ import static org.hamcrest.core.Is.is;
 import static org.hamcrest.core.IsNull.notNullValue;
 import static org.hamcrest.core.IsNull.nullValue;
 import static org.hamcrest.core.IsEqual.equalTo;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.MatcherAssert.assertThat;
 
 import java.io.File;
 import java.io.IOException;
@@ -43,7 +43,7 @@ public class SettingsTest extends BaseTest {
      */
     @Test
     public void testGetString() {
-        String key = Settings.KEYS.CVE_MODIFIED_VALID_FOR_DAYS;
+        String key = Settings.KEYS.NVD_API_DATAFEED_VALID_FOR_DAYS;
         String expResult = "7";
         String result = getSettings().getString(key);
         Assert.assertTrue(result.endsWith(expResult));
@@ -315,5 +315,21 @@ public class SettingsTest extends BaseTest {
         // THEN the property was not set
         assertThat("Expected the property to not be set", getSettings().getArray("key"),
                 equalTo(new String[]{"one", "two"}));
+    }
+
+    @Test
+    public void testMaskedKeys() {
+        getSettings().initMaskedKeys();
+        assertThat("password should be masked",
+                getSettings().getPrintableValue("odc.database.password", "s3Cr3t!"),
+                equalTo("********"));
+
+        assertThat("tokens should be masked",
+                getSettings().getPrintableValue("odc.api.token", "asf4b$3428vasd84$#$45asda"),
+                equalTo("********"));
+
+        assertThat("other keys should not be masked",
+                getSettings().getPrintableValue("odc.version", "5.0.0"),
+                equalTo("5.0.0"));
     }
 }

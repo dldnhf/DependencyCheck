@@ -17,9 +17,11 @@
  */
 package org.owasp.dependencycheck.dependency;
 
-import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.builder.CompareToBuilder;
+import org.apache.commons.lang3.builder.EqualsBuilder;
 import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.jetbrains.annotations.NotNull;
 
 import java.io.Serializable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -35,16 +37,7 @@ public class Evidence implements Serializable, Comparable<Evidence> {
     /**
      * The serial version UID for serialization.
      */
-    private static final long serialVersionUID = 1L;
-    /**
-     * Used as starting point for generating the value in {@link #hashCode()}.
-     */
-    private static final int MAGIC_HASH_INIT_VALUE = 3;
-
-    /**
-     * Used as a multiplier for generating the value in {@link #hashCode()}.
-     */
-    private static final int MAGIC_HASH_MULTIPLIER = 67;
+    private static final long serialVersionUID = 2402386455919067874L;
 
     /**
      * The name of the evidence.
@@ -67,6 +60,11 @@ public class Evidence implements Serializable, Comparable<Evidence> {
     private Confidence confidence;
 
     /**
+     * Whether the evidence originates from a hint.
+     */
+    private boolean fromHint;
+
+    /**
      * Creates a new Evidence object.
      */
     public Evidence() {
@@ -75,16 +73,30 @@ public class Evidence implements Serializable, Comparable<Evidence> {
     /**
      * Creates a new Evidence objects.
      *
-     * @param source the source of the evidence.
-     * @param name the name of the evidence.
-     * @param value the value of the evidence.
+     * @param source     the source of the evidence.
+     * @param name       the name of the evidence.
+     * @param value      the value of the evidence.
      * @param confidence the confidence of the evidence.
      */
     public Evidence(String source, String name, String value, Confidence confidence) {
+        this(source, name, value, confidence, false);
+    }
+
+    /**
+     * Creates a new Evidence objects.
+     *
+     * @param source     the source of the evidence.
+     * @param name       the name of the evidence.
+     * @param value      the value of the evidence.
+     * @param confidence the confidence of the evidence.
+     * @param fromHint whether the evidence was introduced by a hint.
+     */
+    public Evidence(String source, String name, String value, Confidence confidence, boolean fromHint) {
         this.source = source;
         this.name = name;
         this.value = value;
         this.confidence = confidence;
+        this.fromHint = fromHint;
     }
 
     /**
@@ -160,13 +172,31 @@ public class Evidence implements Serializable, Comparable<Evidence> {
     }
 
     /**
+     * Get the value of fromHint.
+     *
+     * @return the value of fromHint
+     */
+    public boolean isFromHint() {
+        return fromHint;
+    }
+
+    /**
+     * Set the value of fromHint.
+     *
+     * @param fromHint new value of fromHint
+     */
+    public void setFromHint(boolean fromHint) {
+        this.fromHint = fromHint;
+    }
+
+    /**
      * Implements the hashCode for Evidence.
      *
      * @return hash code.
      */
     @Override
     public int hashCode() {
-        return new HashCodeBuilder(MAGIC_HASH_INIT_VALUE, MAGIC_HASH_MULTIPLIER)
+        return new HashCodeBuilder(303, 367)
                 .append(StringUtils.lowerCase(name))
                 .append(StringUtils.lowerCase(source))
                 .append(StringUtils.lowerCase(value))
@@ -177,26 +207,25 @@ public class Evidence implements Serializable, Comparable<Evidence> {
     /**
      * Implements equals for Evidence.
      *
-     * @param that an object to check the equality of.
+     * @param obj an object to check the equality of.
      * @return whether the two objects are equal.
      */
-    @SuppressWarnings("deprecation")
     @Override
-    public boolean equals(Object that) {
-        if (this == that) {
-            return true;
-        }
-        if (!(that instanceof Evidence)) {
+    public boolean equals(Object obj) {
+        if (obj == null || !(obj instanceof Evidence)) {
             return false;
         }
-        final Evidence e = (Evidence) that;
-
-        //TODO the call to ObjectUtils.equals needs to be replaced when we
-        //stop supporting Jenkins 1.6 requirement.
-        return StringUtils.equalsIgnoreCase(name, e.name)
-                && StringUtils.equalsIgnoreCase(source, e.source)
-                && StringUtils.equalsIgnoreCase(value, e.value)
-                && ObjectUtils.equals(confidence, e.confidence);
+        if (this == obj) {
+            return true;
+        }
+        final Evidence o = (Evidence) obj;
+        return new EqualsBuilder()
+                .append(this.source == null ? null : this.source.toLowerCase(), o.source == null ? null : o.source.toLowerCase())
+                .append(this.name == null ? null : this.name.toLowerCase(), o.name == null ? null : o.name.toLowerCase())
+                .append(this.value == null ? null : this.value.toLowerCase(), o.value == null ? null : o.value.toLowerCase())
+                .append(this.confidence, o.getConfidence())
+                .append(this.fromHint, o.isFromHint())
+                .build();
     }
 
     /**
@@ -205,51 +234,15 @@ public class Evidence implements Serializable, Comparable<Evidence> {
      * @param o the evidence being compared
      * @return an integer indicating the ordering of the two objects
      */
-    @SuppressWarnings("deprecation")
     @Override
-    public int compareTo(Evidence o) {
-        if (o == null) {
-            throw new IllegalArgumentException("Unable to compare null evidence");
-        }
-        if (StringUtils.equalsIgnoreCase(source, o.source)) {
-            if (StringUtils.equalsIgnoreCase(name, o.name)) {
-                if (StringUtils.equalsIgnoreCase(value, o.value)) {
-                    //TODO the call to ObjectUtils.equals needs to be replaced when we
-                    //stop supporting Jenkins 1.6 requirement.
-                    if (ObjectUtils.equals(confidence, o.confidence)) {
-                        return 0; //they are equal
-                    } else {
-                        return ObjectUtils.compare(confidence, o.confidence);
-                    }
-                } else {
-                    return compareToIgnoreCaseWithNullCheck(value, o.value);
-                }
-            } else {
-                return compareToIgnoreCaseWithNullCheck(name, o.name);
-            }
-        } else {
-            return compareToIgnoreCaseWithNullCheck(source, o.source);
-        }
-    }
-
-    /**
-     * Wrapper around
-     * {@link java.lang.String#compareToIgnoreCase(java.lang.String) String.compareToIgnoreCase}
-     * with an exhaustive, possibly duplicative, check against nulls.
-     *
-     * @param me the value to be compared
-     * @param other the other value to be compared
-     * @return true if the values are equal; otherwise false
-     */
-    private int compareToIgnoreCaseWithNullCheck(String me, String other) {
-        if (me == null && other == null) {
-            return 0;
-        } else if (me == null) {
-            return -1; //the other string is greater than me
-        } else if (other == null) {
-            return 1; //me is greater than the other string
-        }
-        return me.compareToIgnoreCase(other);
+    public int compareTo(@NotNull Evidence o) {
+        return new CompareToBuilder()
+                .append(this.source == null ? null : this.source.toLowerCase(), o.source == null ? null : o.source.toLowerCase())
+                .append(this.name == null ? null : this.name.toLowerCase(), o.name == null ? null : o.name.toLowerCase())
+                .append(this.value == null ? null : this.value.toLowerCase(), o.value == null ? null : o.value.toLowerCase())
+                .append(this.confidence, o.getConfidence())
+                .append(this.fromHint, o.isFromHint())
+                .toComparison();
     }
 
     /**
@@ -259,6 +252,7 @@ public class Evidence implements Serializable, Comparable<Evidence> {
      */
     @Override
     public String toString() {
-        return "Evidence{" + "name=" + name + ", source=" + source + ", value=" + value + ", confidence=" + confidence + '}';
+        return "Evidence{" + "name=" + name + ", source=" + source + ", value=" + value + ", confidence=" + confidence
+                + ", fromHint=" + fromHint + '}';
     }
 }

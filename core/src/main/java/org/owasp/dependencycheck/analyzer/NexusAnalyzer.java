@@ -17,14 +17,17 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import org.apache.commons.io.FileUtils;
+
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.data.nexus.MavenArtifact;
 import org.owasp.dependencycheck.data.nexus.NexusSearch;
+import org.owasp.dependencycheck.data.nexus.NexusV2Search;
+import org.owasp.dependencycheck.data.nexus.NexusV3Search;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.Evidence;
+import org.owasp.dependencycheck.utils.FileUtils;
 import org.owasp.dependencycheck.xml.pom.PomUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +38,7 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.Locale;
 import javax.annotation.concurrent.ThreadSafe;
 import org.owasp.dependencycheck.dependency.EvidenceType;
 import org.owasp.dependencycheck.exception.InitializationException;
@@ -42,7 +46,9 @@ import org.owasp.dependencycheck.utils.DownloadFailedException;
 import org.owasp.dependencycheck.utils.Downloader;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.InvalidSettingException;
+import org.owasp.dependencycheck.utils.ResourceNotFoundException;
 import org.owasp.dependencycheck.utils.Settings;
+import org.owasp.dependencycheck.utils.TooManyRequestsException;
 
 /**
  * Analyzer which will attempt to locate a dependency on a Nexus service by
@@ -125,16 +131,17 @@ public class NexusAnalyzer extends AbstractFileTypeAnalyzer {
     private boolean checkEnabled() {
         /* Enable this analyzer ONLY if the Nexus URL has been set to something
          other than the default one (if it's the default one, we'll use the
-         central one) and it's enabled by the user.
+         central analyzer) and it's enabled by the user.
          */
         boolean retval = false;
         try {
-            if (!DEFAULT_URL.equals(getSettings().getString(Settings.KEYS.ANALYZER_NEXUS_URL))
-                    && getSettings().getBoolean(Settings.KEYS.ANALYZER_NEXUS_ENABLED)) {
-                LOGGER.info("Enabling Nexus analyzer");
-                retval = true;
-            } else {
-                LOGGER.debug("Nexus analyzer disabled, using Central instead");
+            if (getSettings().getBoolean(Settings.KEYS.ANALYZER_NEXUS_ENABLED)) {
+                if (getSettings().getString(Settings.KEYS.ANALYZER_NEXUS_URL) != null
+                        && !DEFAULT_URL.equals(getSettings().getString(Settings.KEYS.ANALYZER_NEXUS_URL))) {
+                    retval = true;
+                } else {
+                    LOGGER.warn("Disabling Nexus analyzer - please specify the URL to a Nexus Server");
+                }
             }
         } catch (InvalidSettingException ise) {
             LOGGER.warn("Invalid setting. Disabling Nexus analyzer");
@@ -166,17 +173,38 @@ public class NexusAnalyzer extends AbstractFileTypeAnalyzer {
         if (isEnabled()) {
             final boolean useProxy = useProxy();
             LOGGER.debug("Using proxy: {}", useProxy);
-            try {
-                searcher = new NexusSearch(getSettings(), useProxy);
-                if (!searcher.preflightRequest()) {
-                    setEnabled(false);
-                    throw new InitializationException("There was an issue getting Nexus status. Disabling analyzer.");
-                }
-            } catch (MalformedURLException mue) {
-                setEnabled(false);
-                throw new InitializationException("Malformed URL to Nexus", mue);
-            }
+            searcher = createNexusSearchOrDisable(useProxy);
         }
+    }
+
+    /**
+     * Creates a NexusSearch for the appropriate Nexus version (Nexus V2 and V3 supported).
+     * <p>
+     * If errors are encountered creating or validating the NexusSearch it disables this analyzer.
+     *
+     * @param useProxy Whether a proxy is to be used
+     * @return A NexusSearch appropriate for the configured ANALYZER_NEXUS_URL
+     * @throws InitializationException Upon errors creating of validating the ANALYZER_NEXUS_URL
+     */
+    private NexusSearch createNexusSearchOrDisable(boolean useProxy) throws InitializationException {
+        final Settings settings = getSettings();
+        final String nexusRootURL = settings.getString(Settings.KEYS.ANALYZER_NEXUS_URL);
+        final NexusSearch result;
+        try {
+            if (nexusRootURL.toLowerCase(Locale.ROOT).contains("service/local/")) {
+                result = new NexusV2Search(settings, useProxy);
+            } else {
+                result = new NexusV3Search(settings, useProxy);
+            }
+            if (!result.preflightRequest()) {
+                setEnabled(false);
+                throw new InitializationException("There was an error getting Nexus status. Disabling NexusAnalyzer.");
+            }
+        } catch (MalformedURLException mue) {
+            setEnabled(false);
+            throw new InitializationException("Malformed URL to Nexus. Disabling NexusAnalyzer", mue);
+        }
+        return result;
     }
 
     /**
@@ -260,9 +288,16 @@ public class NexusAnalyzer extends AbstractFileTypeAnalyzer {
                 } catch (DownloadFailedException ex) {
                     LOGGER.warn("Unable to download pom.xml for {} from Nexus repository; "
                             + "this could result in undetected CPE/CVEs.", dependency.getFileName());
+                } catch (TooManyRequestsException ex) {
+                    this.setEnabled(false);
+                    throw new AnalysisException("Received a 429 - too many requests from nexus; "
+                            + "the nexus analyzer is being disabled.", ex);
+                } catch (ResourceNotFoundException ex) {
+                    LOGGER.warn("pom.xml not found for {} from nexus; "
+                            + "this could result in undetected CPE/CVEs.", dependency.getFileName());
                 } finally {
-                    if (pomFile != null && pomFile.exists() && !FileUtils.deleteQuietly(pomFile)) {
-                        LOGGER.debug("Failed to delete temporary pom file {}", pomFile.toString());
+                    if (pomFile != null && pomFile.exists() && !FileUtils.delete(pomFile)) {
+                        LOGGER.debug("Failed to delete temporary pom file {}", pomFile);
                         pomFile.deleteOnExit();
                     }
                 }

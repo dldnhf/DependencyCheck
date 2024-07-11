@@ -17,15 +17,21 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
+import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.concurrent.ThreadSafe;
+
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.analyzer.exception.LambdaExceptionWrapper;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.data.nvdcve.CveDB;
 import org.owasp.dependencycheck.data.nvdcve.DatabaseException;
 import org.owasp.dependencycheck.dependency.Dependency;
-import org.owasp.dependencycheck.dependency.Identifier;
 import org.owasp.dependencycheck.dependency.Vulnerability;
+import org.owasp.dependencycheck.dependency.Vulnerability.Source;
+import org.owasp.dependencycheck.dependency.VulnerableSoftware;
+import org.owasp.dependencycheck.dependency.naming.CpeIdentifier;
 import org.owasp.dependencycheck.utils.Settings;
 
 /**
@@ -39,10 +45,6 @@ import org.owasp.dependencycheck.utils.Settings;
 public class NvdCveAnalyzer extends AbstractAnalyzer {
 
     /**
-     * The Logger for use throughout the class
-     */
-    //private static final org.slf4j.Logger LOGGER = LoggerFactory.getLogger(NvdCveAnalyzer.class);
-    /**
      * Analyzes a dependency and attempts to determine if there are any CPE
      * identifiers for this dependency.
      *
@@ -54,27 +56,36 @@ public class NvdCveAnalyzer extends AbstractAnalyzer {
     @Override
     protected void analyzeDependency(Dependency dependency, Engine engine) throws AnalysisException {
         final CveDB cveDB = engine.getDatabase();
-        for (Identifier id : dependency.getIdentifiers()) {
-            if ("cpe".equals(id.getType())) {
-                try {
-                    final String value = id.getValue();
-                    final List<Vulnerability> vulns = cveDB.getVulnerabilities(value);
-                    dependency.addVulnerabilities(vulns);
-                } catch (DatabaseException ex) {
-                    throw new AnalysisException(ex);
-                }
-            }
-        }
-        for (Identifier id : dependency.getSuppressedIdentifiers()) {
-            if ("cpe".equals(id.getType())) {
-                try {
-                    final String value = id.getValue();
-                    final List<Vulnerability> vulns = cveDB.getVulnerabilities(value);
-                    dependency.addSuppressedVulnerabilities(vulns);
-                } catch (DatabaseException ex) {
-                    throw new AnalysisException(ex);
-                }
-            }
+        try {
+            dependency.getVulnerableSoftwareIdentifiers().stream()
+                    .filter((i) -> (i instanceof CpeIdentifier))
+                    .map(i -> (CpeIdentifier) i)
+                    .forEach(i -> {
+                        try {
+                            final List<Vulnerability> vulns = filterEcosystem(dependency.getEcosystem(), cveDB.getVulnerabilities(i.getCpe()));
+
+                            if (Ecosystem.NODEJS.equals(dependency.getEcosystem())) {
+                                replaceOrAddVulnerability(dependency, vulns);
+                            } else {
+                                dependency.addVulnerabilities(vulns);
+                            }
+                        } catch (DatabaseException ex) {
+                            throw new LambdaExceptionWrapper(new AnalysisException(ex));
+                        }
+                    });
+            dependency.getSuppressedIdentifiers().stream()
+                    .filter((i) -> (i instanceof CpeIdentifier))
+                    .map(i -> (CpeIdentifier) i)
+                    .forEach(i -> {
+                        try {
+                            final List<Vulnerability> vulns = cveDB.getVulnerabilities(i.getCpe());
+                            dependency.addSuppressedVulnerabilities(vulns);
+                        } catch (DatabaseException ex) {
+                            throw new LambdaExceptionWrapper(new AnalysisException(ex));
+                        }
+                    });
+        } catch (LambdaExceptionWrapper ex) {
+            throw (AnalysisException) ex.getCause();
         }
     }
 
@@ -107,5 +118,86 @@ public class NvdCveAnalyzer extends AbstractAnalyzer {
     @Override
     protected String getAnalyzerEnabledSettingKey() {
         return Settings.KEYS.ANALYZER_NVD_CVE_ENABLED;
+    }
+
+    /**
+     * Evaluates if the vulnerability is already present; if it is the
+     * vulnerability is not added.
+     *
+     * @param dependency a reference to the dependency being analyzed
+     * @param vulns the vulnerability to add
+     */
+    private void replaceOrAddVulnerability(Dependency dependency, List<Vulnerability> vulns) {
+        vulns.forEach(v -> v.getReferences().forEach(ref -> dependency.getVulnerabilities().forEach(existing -> {
+                if (existing.getSource() == Source.NPM
+                        && ref.getName() != null
+                        && ref.getName().equals("https://nodesecurity.io/advisories/" + existing.getName())) {
+                    dependency.removeVulnerability(existing);
+                }
+            })));
+        dependency.addVulnerabilities(vulns);
+    }
+
+    /**
+     * Filters the list of vulnerabilities for the given ecosystem compared to
+     * the target software from the NVD.
+     *
+     * @param ecosystem the dependency's ecosystem
+     * @param vulnerabilities the list of vulnerabilities to filter
+     * @return the filtered list of vulnerabilities
+     */
+    private synchronized List<Vulnerability> filterEcosystem(String ecosystem, List<Vulnerability> vulnerabilities) {
+        final List<Vulnerability> remove = new ArrayList<>();
+        vulnerabilities.forEach((v) -> {
+            boolean found = false;
+            final List<VulnerableSoftware> removeSoftare = new ArrayList<>();
+            for (VulnerableSoftware s : v.getVulnerableSoftware()) {
+                if (ecosystemMatchesTargetSoftware(ecosystem, s.getTargetSw())) {
+                    found = true;
+                } else {
+                    removeSoftare.add(s);
+                }
+            }
+            if (found) {
+                if (!removeSoftare.isEmpty()) {
+                    removeSoftare.forEach(v.getVulnerableSoftware()::remove);
+                }
+            } else {
+                remove.add(v);
+            }
+        });
+        if (!remove.isEmpty()) {
+            vulnerabilities.removeAll(remove);
+        }
+        return vulnerabilities;
+    }
+
+    /**
+     * Determines if the target software matches the given ecosystem. Currently,
+     * this is very Node JS specific and broadly returns matches for everything
+     * else.
+     *
+     * @param ecosystem the ecosystem to match against
+     * @param targetSoftware the target software from the NVD
+     * @return <code>true</code> if there is a match; otherwise
+     * <code>false</code>
+     */
+    private boolean ecosystemMatchesTargetSoftware(String ecosystem, String targetSoftware) {
+        if ("*".equals(targetSoftware) || "-".equals(targetSoftware)) {
+            return true;
+        }
+        if (Ecosystem.NODEJS.equals(ecosystem)) {
+            switch (targetSoftware.toLowerCase()) {
+                case "nodejs":
+                case "node.js":
+                case "node_js":
+                case "npm":
+                case "node-js":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        return true;
     }
 }

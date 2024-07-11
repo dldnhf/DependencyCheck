@@ -32,7 +32,43 @@ import org.slf4j.impl.StaticLoggerBinder;
  *
  * @author Jeremy Long
  */
+//While duplicate code is general bad - this is calling out getters/setters
+//on unrelated ODC clients (the DependencyCheckScanAgent).
+@SuppressWarnings("common-java:DuplicatedBlocks")
 public class Update extends Purge {
+
+    /**
+     * The NVD API endpoint.
+     */
+    private String nvdApiEndpoint;
+    /**
+     * The NVD API Key.
+     */
+    private String nvdApiKey;
+    /**
+     * The maximum number of retry requests for a single call to the NVD API.
+     */
+    private Integer nvdMaxRetryCount;
+    /**
+     * The number of hours to wait before checking for new updates from the NVD.
+     */
+    private Integer nvdValidForHours;
+    /**
+     * The NVD API Data Feed URL.
+     */
+    private String nvdDatafeedUrl;
+    /**
+     * The username for basic auth to the NVD Data Feed.
+     */
+    private String nvdUser;
+    /**
+     * The password for basic auth to the NVD Data Feed.
+     */
+    private String nvdPassword;
+    /**
+     * The time in milliseconds to wait between downloading NVD API data.
+     */
+    private int nvdApiDelay = 0;
 
     /**
      * The Proxy Server.
@@ -51,9 +87,17 @@ public class Update extends Purge {
      */
     private String proxyPassword;
     /**
+     * Non proxy hosts
+     */
+    private String nonProxyHosts;
+    /**
      * The Connection Timeout.
      */
     private String connectionTimeout;
+    /**
+     * The Read Timeout.
+     */
+    private String readTimeout;
     /**
      * The database driver name; such as org.h2.Driver.
      */
@@ -75,25 +119,19 @@ public class Update extends Purge {
      */
     private String databasePassword;
     /**
-     * The url for the modified NVD CVE (1.2 schema).
+     * The number of hours to wait before re-checking hosted suppressions file
+     * for updates.
      */
-    private String cveUrl12Modified;
+    private Integer hostedSuppressionsValidForHours;
     /**
-     * Base Data Mirror URL for CVE 1.2.
+     * Whether the hosted suppressions file will be updated regardless of the
+     * `autoupdate` settings. Defaults to false.
      */
-    private String cveUrl12Base;
+    private Boolean hostedSuppressionsForceUpdate;
     /**
-     * Data Mirror URL for CVE 2.0.
+     * Whether the hosted suppressions file will be used. Defaults to true.
      */
-    private String cveUrl20Base;
-    /**
-     * The number of hours to wait before re-checking for updates.
-     */
-    private Integer cveValidForHours;
-    /**
-     * The url for the modified NVD CVE (2.0 schema).
-     */
-    private String cveUrl20Modified;
+    private Boolean hostedSuppressionsEnabled;
 
     /**
      * Construct a new UpdateTask.
@@ -103,6 +141,150 @@ public class Update extends Purge {
         // Call this before Dependency Check Core starts logging anything - this way, all SLF4J messages from
         // core end up coming through this tasks logger
         StaticLoggerBinder.getSingleton().setTask(this);
+    }
+
+    /**
+     * Get the value of nvdApiEndpoint.
+     *
+     * @return the value of nvdApiEndpoint
+     */
+    public String getNvdApiEndpoint() {
+        return nvdApiEndpoint;
+    }
+
+    /**
+     * Set the value of nvdApiEndpoint.
+     *
+     * @param nvdApiEndpoint new value of nvdApiEndpoint
+     */
+    public void setNvdApiEndpoint(String nvdApiEndpoint) {
+        this.nvdApiEndpoint = nvdApiEndpoint;
+    }
+
+    /**
+     * Get the value of nvdApiKey.
+     *
+     * @return the value of nvdApiKey
+     */
+    public String getNvdApiKey() {
+        return nvdApiKey;
+    }
+
+    /**
+     * Set the value of nvdApiKey.
+     *
+     * @param nvdApiKey new value of nvdApiKey
+     */
+    public void setNvdApiKey(String nvdApiKey) {
+        this.nvdApiKey = nvdApiKey;
+    }
+
+    /**
+     * Get the value of nvdMaxRetryCount.
+     *
+     * @return the value of nvdMaxRetryCount
+     */
+    public int getNvdMaxRetryCounts() {
+        return nvdMaxRetryCount;
+    }
+
+    /**
+     * Set the value of nvdMaxRetryCount.
+     *
+     * @param nvdMaxRetryCount new value of nvdMaxRetryCount
+     */
+    public void setNvdMaxRetryCount(int nvdMaxRetryCount) {
+        this.nvdMaxRetryCount = nvdMaxRetryCount;
+    }
+
+    /**
+     * Get the value of nvdValidForHours.
+     *
+     * @return the value of nvdValidForHours
+     */
+    public int getNvdValidForHours() {
+        return nvdValidForHours;
+    }
+
+    /**
+     * Set the value of nvdValidForHours.
+     *
+     * @param nvdValidForHours new value of nvdValidForHours
+     */
+    public void setNvdValidForHours(int nvdValidForHours) {
+        this.nvdValidForHours = nvdValidForHours;
+    }
+
+    /**
+     * Get the value of nvdDatafeedUrl.
+     *
+     * @return the value of nvdDatafeedUrl
+     */
+    public String getNvdDatafeedUrl() {
+        return nvdDatafeedUrl;
+    }
+
+    /**
+     * Set the value of nvdDatafeedUrl.
+     *
+     * @param nvdDatafeedUrl new value of nvdDatafeedUrl
+     */
+    public void setNvdDatafeedUrl(String nvdDatafeedUrl) {
+        this.nvdDatafeedUrl = nvdDatafeedUrl;
+    }
+
+    /**
+     * Get the value of nvdUser.
+     *
+     * @return the value of nvdUser
+     */
+    public String getNvdUser() {
+        return nvdUser;
+    }
+
+    /**
+     * Set the value of nvdUser.
+     *
+     * @param nvdUser new value of nvdUser
+     */
+    public void setNvdUser(String nvdUser) {
+        this.nvdUser = nvdUser;
+    }
+
+    /**
+     * Get the value of nvdPassword.
+     *
+     * @return the value of nvdPassword
+     */
+    public String getNvdPassword() {
+        return nvdPassword;
+    }
+
+    /**
+     * Set the value of nvdPassword.
+     *
+     * @param nvdPassword new value of nvdPassword
+     */
+    public void setNvdPassword(String nvdPassword) {
+        this.nvdPassword = nvdPassword;
+    }
+
+    /**
+     * Get the value of nvdApiDelay.
+     *
+     * @return the value of nvdApiDelay
+     */
+    public int getNvdApiDelay() {
+        return nvdApiDelay;
+    }
+
+    /**
+     * Set the value of nvdApiDelay.
+     *
+     * @param nvdApiDelay new value of nvdApiDelay
+     */
+    public void setNvdApiDelay(int nvdApiDelay) {
+        this.nvdApiDelay = nvdApiDelay;
     }
 
     /**
@@ -178,6 +360,24 @@ public class Update extends Purge {
     }
 
     /**
+     * Get the value of nonProxyHosts.
+     *
+     * @return the value of nonProxyHosts
+     */
+    public String getNonProxyHosts() {
+        return nonProxyHosts;
+    }
+
+    /**
+     * Set the value of nonProxyHosts.
+     *
+     * @param nonProxyHosts new value of nonProxyHosts
+     */
+    public void setNonProxyHosts(String nonProxyHosts) {
+        this.nonProxyHosts = nonProxyHosts;
+    }
+
+    /**
      * Get the value of connectionTimeout.
      *
      * @return the value of connectionTimeout
@@ -193,6 +393,24 @@ public class Update extends Purge {
      */
     public void setConnectionTimeout(String connectionTimeout) {
         this.connectionTimeout = connectionTimeout;
+    }
+
+    /**
+     * Get the value of readTimeout.
+     *
+     * @return the value of readTimeout
+     */
+    public String getReadTimeout() {
+        return readTimeout;
+    }
+
+    /**
+     * Set the value of readTimeout.
+     *
+     * @param readTimeout new value of readTimeout
+     */
+    public void setReadTimeout(String readTimeout) {
+        this.readTimeout = readTimeout;
     }
 
     /**
@@ -286,93 +504,59 @@ public class Update extends Purge {
     }
 
     /**
-     * Get the value of cveUrl12Modified.
+     * Get the value of hostedSuppressionsValidForHours.
      *
-     * @return the value of cveUrl12Modified
+     * @return the value of hostedSuppressionsValidForHours
      */
-    public String getCveUrl12Modified() {
-        return cveUrl12Modified;
+    public Integer getHostedSuppressionsValidForHours() {
+        return hostedSuppressionsValidForHours;
     }
 
     /**
-     * Set the value of cveUrl12Modified.
+     * Set the value of hostedSuppressionsValidForHours.
      *
-     * @param cveUrl12Modified new value of cveUrl12Modified
+     * @param hostedSuppressionsValidForHours new value of
+     * hostedSuppressionsValidForHours
      */
-    public void setCveUrl12Modified(String cveUrl12Modified) {
-        this.cveUrl12Modified = cveUrl12Modified;
+    public void setHostedSuppressionsValidForHours(final Integer hostedSuppressionsValidForHours) {
+        this.hostedSuppressionsValidForHours = hostedSuppressionsValidForHours;
     }
 
     /**
-     * Get the value of cveUrl20Modified.
+     * Get the value of hostedSuppressionsForceUpdate.
      *
-     * @return the value of cveUrl20Modified
+     * @return the value of hostedSuppressionsForceUpdate
      */
-    public String getCveUrl20Modified() {
-        return cveUrl20Modified;
+    public Boolean isHostedSuppressionsForceUpdate() {
+        return hostedSuppressionsForceUpdate;
     }
 
     /**
-     * Set the value of cveUrl20Modified.
+     * Set the value of hostedSuppressionsForceUpdate.
      *
-     * @param cveUrl20Modified new value of cveUrl20Modified
+     * @param hostedSuppressionsForceUpdate new value of
+     * hostedSuppressionsForceUpdate
      */
-    public void setCveUrl20Modified(String cveUrl20Modified) {
-        this.cveUrl20Modified = cveUrl20Modified;
+    public void setHostedSuppressionsForceUpdate(final Boolean hostedSuppressionsForceUpdate) {
+        this.hostedSuppressionsForceUpdate = hostedSuppressionsForceUpdate;
     }
 
     /**
-     * Get the value of cveUrl12Base.
+     * Get the value of hostedSuppressionsEnabled.
      *
-     * @return the value of cveUrl12Base
+     * @return the value of hostedSuppressionsEnabled
      */
-    public String getCveUrl12Base() {
-        return cveUrl12Base;
+    public Boolean isHostedSuppressionsEnabled() {
+        return hostedSuppressionsEnabled;
     }
 
     /**
-     * Set the value of cveUrl12Base.
+     * Set the value of hostedSuppressionsEnabled.
      *
-     * @param cveUrl12Base new value of cveUrl12Base
+     * @param hostedSuppressionsEnabled new value of hostedSuppressionsEnabled
      */
-    public void setCveUrl12Base(String cveUrl12Base) {
-        this.cveUrl12Base = cveUrl12Base;
-    }
-
-    /**
-     * Get the value of cveUrl20Base.
-     *
-     * @return the value of cveUrl20Base
-     */
-    public String getCveUrl20Base() {
-        return cveUrl20Base;
-    }
-
-    /**
-     * Set the value of cveUrl20Base.
-     *
-     * @param cveUrl20Base new value of cveUrl20Base
-     */
-    public void setCveUrl20Base(String cveUrl20Base) {
-        this.cveUrl20Base = cveUrl20Base;
-    }
-
-    /**
-     * Get the value of cveValidForHours.
-     *
-     * @return the value of cveValidForHours
-     */
-    public Integer getCveValidForHours() {
-        return cveValidForHours;
-    }
-
-    /**
-     * Set the value of cveValidForHours.
-     *
-     * @param cveValidForHours new value of cveValidForHours
-     */
-    public void setCveValidForHours(Integer cveValidForHours) {
-        this.cveValidForHours = cveValidForHours;
+    public void setHostedSuppressionsEnabled(Boolean hostedSuppressionsEnabled) {
+        this.hostedSuppressionsEnabled = hostedSuppressionsEnabled;
     }
 
     /**
@@ -382,18 +566,18 @@ public class Update extends Purge {
      * @throws BuildException thrown if a connection to the local database
      * cannot be made.
      */
+    //see note on `Check.dealWithReferences()` for information on this suppression
+    @SuppressWarnings("squid:RedundantThrowsDeclarationCheck")
     @Override
-    public void execute() throws BuildException {
+    protected void executeWithContextClassloader() throws BuildException {
         populateSettings();
         try (Engine engine = new Engine(Update.class.getClassLoader(), getSettings())) {
-            try {
-                engine.doUpdates();
-            } catch (UpdateException ex) {
-                if (this.isFailOnError()) {
-                    throw new BuildException(ex);
-                }
-                log(ex.getMessage(), Project.MSG_ERR);
+            engine.doUpdates();
+        } catch (UpdateException ex) {
+            if (this.isFailOnError()) {
+                throw new BuildException(ex);
             }
+            log(ex.getMessage(), Project.MSG_ERR);
         } catch (DatabaseException ex) {
             final String msg = "Unable to connect to the dependency-check database; unable to update the NVD data";
             if (this.isFailOnError()) {
@@ -412,6 +596,8 @@ public class Update extends Purge {
      *
      * @throws BuildException thrown when an invalid setting is configured.
      */
+    //see note on `Check.dealWithReferences()` for information on this suppression
+    @SuppressWarnings("squid:RedundantThrowsDeclarationCheck")
     @Override
     protected void populateSettings() throws BuildException {
         super.populateSettings();
@@ -419,21 +605,36 @@ public class Update extends Purge {
         getSettings().setStringIfNotEmpty(Settings.KEYS.PROXY_PORT, proxyPort);
         getSettings().setStringIfNotEmpty(Settings.KEYS.PROXY_USERNAME, proxyUsername);
         getSettings().setStringIfNotEmpty(Settings.KEYS.PROXY_PASSWORD, proxyPassword);
+        getSettings().setStringIfNotEmpty(Settings.KEYS.PROXY_NON_PROXY_HOSTS, nonProxyHosts);
         getSettings().setStringIfNotEmpty(Settings.KEYS.CONNECTION_TIMEOUT, connectionTimeout);
+        getSettings().setStringIfNotEmpty(Settings.KEYS.CONNECTION_READ_TIMEOUT, readTimeout);
         getSettings().setStringIfNotEmpty(Settings.KEYS.DB_DRIVER_NAME, databaseDriverName);
         getSettings().setStringIfNotEmpty(Settings.KEYS.DB_DRIVER_PATH, databaseDriverPath);
         getSettings().setStringIfNotEmpty(Settings.KEYS.DB_CONNECTION_STRING, connectionString);
         getSettings().setStringIfNotEmpty(Settings.KEYS.DB_USER, databaseUser);
         getSettings().setStringIfNotEmpty(Settings.KEYS.DB_PASSWORD, databasePassword);
-        getSettings().setStringIfNotEmpty(Settings.KEYS.CVE_MODIFIED_12_URL, cveUrl12Modified);
-        getSettings().setStringIfNotEmpty(Settings.KEYS.CVE_MODIFIED_20_URL, cveUrl20Modified);
-        getSettings().setStringIfNotEmpty(Settings.KEYS.CVE_SCHEMA_1_2, cveUrl12Base);
-        getSettings().setStringIfNotEmpty(Settings.KEYS.CVE_SCHEMA_2_0, cveUrl20Base);
-        if (cveValidForHours != null) {
-            if (cveValidForHours >= 0) {
-                getSettings().setInt(Settings.KEYS.CVE_CHECK_VALID_FOR_HOURS, cveValidForHours);
+        getSettings().setIntIfNotNull(Settings.KEYS.HOSTED_SUPPRESSIONS_VALID_FOR_HOURS, hostedSuppressionsValidForHours);
+        getSettings().setBooleanIfNotNull(Settings.KEYS.HOSTED_SUPPRESSIONS_FORCEUPDATE, hostedSuppressionsForceUpdate);
+        getSettings().setBooleanIfNotNull(Settings.KEYS.HOSTED_SUPPRESSIONS_ENABLED, hostedSuppressionsEnabled);
+
+        getSettings().setStringIfNotEmpty(Settings.KEYS.NVD_API_KEY, nvdApiKey);
+        getSettings().setStringIfNotEmpty(Settings.KEYS.NVD_API_ENDPOINT, nvdApiEndpoint);
+        getSettings().setIntIfNotNull(Settings.KEYS.NVD_API_DELAY, nvdApiDelay);
+        getSettings().setStringIfNotEmpty(Settings.KEYS.NVD_API_DATAFEED_URL, nvdDatafeedUrl);
+        getSettings().setStringIfNotEmpty(Settings.KEYS.NVD_API_DATAFEED_USER, nvdUser);
+        getSettings().setStringIfNotEmpty(Settings.KEYS.NVD_API_DATAFEED_PASSWORD, nvdPassword);
+        if (nvdMaxRetryCount != null) {
+            if (nvdMaxRetryCount > 0) {
+                getSettings().setInt(Settings.KEYS.NVD_API_MAX_RETRY_COUNT, nvdMaxRetryCount);
             } else {
-                throw new BuildException("Invalid setting: `cpeValidForHours` must be 0 or greater");
+                throw new BuildException("Invalid setting: `nvdMaxRetryCount` must be greater than zero");
+            }
+        }
+        if (nvdValidForHours != null) {
+            if (nvdValidForHours >= 0) {
+                getSettings().setInt(Settings.KEYS.NVD_API_VALID_FOR_HOURS, nvdValidForHours);
+            } else {
+                throw new BuildException("Invalid setting: `nvdValidForHours` must be 0 or greater");
             }
         }
     }

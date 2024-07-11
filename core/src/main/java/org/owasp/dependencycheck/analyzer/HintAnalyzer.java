@@ -17,36 +17,38 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Set;
-import java.util.regex.Pattern;
-import javax.annotation.concurrent.ThreadSafe;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.Evidence;
 import org.owasp.dependencycheck.dependency.EvidenceType;
 import org.owasp.dependencycheck.exception.InitializationException;
-import org.owasp.dependencycheck.xml.suppression.PropertyType;
 import org.owasp.dependencycheck.utils.DownloadFailedException;
 import org.owasp.dependencycheck.utils.Downloader;
 import org.owasp.dependencycheck.utils.FileUtils;
+import org.owasp.dependencycheck.utils.ResourceNotFoundException;
 import org.owasp.dependencycheck.utils.Settings;
+import org.owasp.dependencycheck.utils.TooManyRequestsException;
 import org.owasp.dependencycheck.xml.hints.EvidenceMatcher;
-import org.owasp.dependencycheck.xml.hints.VendorDuplicatingHintRule;
 import org.owasp.dependencycheck.xml.hints.HintParseException;
 import org.owasp.dependencycheck.xml.hints.HintParser;
 import org.owasp.dependencycheck.xml.hints.HintRule;
+import org.owasp.dependencycheck.xml.hints.VendorDuplicatingHintRule;
+import org.owasp.dependencycheck.xml.suppression.PropertyType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.SAXException;
+
+import javax.annotation.concurrent.ThreadSafe;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * This analyzer adds evidence to dependencies to enhance the accuracy of
@@ -80,7 +82,7 @@ public class HintAnalyzer extends AbstractAnalyzer {
     /**
      * The phase that this analyzer is intended to run in.
      */
-    private static final AnalysisPhase ANALYSIS_PHASE = AnalysisPhase.PRE_IDENTIFIER_ANALYSIS;
+    private static final AnalysisPhase ANALYSIS_PHASE = AnalysisPhase.POST_INFORMATION_COLLECTION2;
 
     /**
      * Returns the name of the analyzer.
@@ -139,6 +141,7 @@ public class HintAnalyzer extends AbstractAnalyzer {
      * the dependency.
      */
     @Override
+    @SuppressWarnings("StringSplitter")
     protected void analyzeDependency(Dependency dependency, Engine engine) throws AnalysisException {
         for (HintRule hint : hints) {
             boolean matchFound = false;
@@ -165,7 +168,7 @@ public class HintAnalyzer extends AbstractAnalyzer {
                 }
             }
             if (!matchFound) {
-                for (PropertyType pt : hint.getFilenames()) {
+                for (PropertyType pt : hint.getFileNames()) {
                     if (pt.matches(dependency.getFileName())) {
                         matchFound = true;
                         break;
@@ -173,41 +176,33 @@ public class HintAnalyzer extends AbstractAnalyzer {
                 }
             }
             if (matchFound) {
-                for (Evidence e : hint.getAddVendor()) {
+                hint.getAddVendor().forEach((e) -> {
                     dependency.addEvidence(EvidenceType.VENDOR, e);
-                }
-                for (Evidence e : hint.getAddProduct()) {
+                    for (String weighting : e.getValue().split(" ")) {
+                        dependency.addVendorWeighting(weighting);
+                    }
+                });
+                hint.getAddProduct().forEach((e) -> {
                     dependency.addEvidence(EvidenceType.PRODUCT, e);
-                }
-                for (Evidence e : hint.getAddVersion()) {
-                    dependency.addEvidence(EvidenceType.VERSION, e);
-                }
+                    for (String weighting : e.getValue().split(" ")) {
+                        dependency.addProductWeighting(weighting);
+                    }
+                });
+                hint.getAddVersion().forEach((e) -> dependency.addEvidence(EvidenceType.VERSION, e));
 
-                for (EvidenceMatcher e : hint.getRemoveVendor()) {
-                    removeMatchingEvidences(dependency, EvidenceType.VENDOR, e);
-                }
-                for (EvidenceMatcher e : hint.getRemoveProduct()) {
-                    removeMatchingEvidences(dependency, EvidenceType.PRODUCT, e);
-                }
-                for (EvidenceMatcher e : hint.getRemoveVersion()) {
-                    removeMatchingEvidences(dependency, EvidenceType.VERSION, e);
-                }
+                hint.getRemoveVendor().forEach((e) -> removeMatchingEvidences(dependency, EvidenceType.VENDOR, e));
+                hint.getRemoveProduct().forEach((e) -> removeMatchingEvidences(dependency, EvidenceType.PRODUCT, e));
+                hint.getRemoveVersion().forEach((e) -> removeMatchingEvidences(dependency, EvidenceType.VERSION, e));
             }
         }
 
-        final Iterator<Evidence> itr = dependency.getEvidence(EvidenceType.VENDOR).iterator();
-        final List<Evidence> newEntries = new ArrayList<>();
-        while (itr.hasNext()) {
-            final Evidence e = itr.next();
+        for (Evidence e : dependency.getEvidence(EvidenceType.VENDOR)) {
             for (VendorDuplicatingHintRule dhr : vendorHints) {
                 if (dhr.getValue().equalsIgnoreCase(e.getValue())) {
-                    newEntries.add(new Evidence(e.getSource() + " (hint)",
-                            e.getName(), dhr.getDuplicate(), e.getConfidence()));
+                    dependency.addEvidence(EvidenceType.VENDOR, new Evidence(e.getSource() + " (hint)",
+                            e.getName(), dhr.getDuplicate(), e.getConfidence(), true));
                 }
             }
-        }
-        for (Evidence e : newEntries) {
-            dependency.addEvidence(EvidenceType.VENDOR, e);
         }
     }
 
@@ -252,10 +247,13 @@ public class HintAnalyzer extends AbstractAnalyzer {
         final List<VendorDuplicatingHintRule> localVendorHints;
         final HintParser parser = new HintParser();
         File file = null;
-        try {
-            parser.parseHints(FileUtils.getResourceAsStream(HINT_RULE_FILE_NAME));
-        } catch (SAXException ex) {
-            throw new HintParseException("Error parsing hinits: " + ex.getMessage(), ex);
+        try (InputStream in = FileUtils.getResourceAsStream(HINT_RULE_FILE_NAME)) {
+            if (in == null) {
+                throw new HintParseException("Hint rules `" + HINT_RULE_FILE_NAME + "` could not be found");
+            }
+            parser.parseHints(in);
+        } catch (SAXException | IOException ex) {
+            throw new HintParseException("Error parsing hints: " + ex.getMessage(), ex);
         }
         localHints = parser.getHintRules();
         localVendorHints = parser.getVendorDuplicatingHintRules();
@@ -264,7 +262,7 @@ public class HintAnalyzer extends AbstractAnalyzer {
         if (filePath != null) {
             boolean deleteTempFile = false;
             try {
-                final Pattern uriRx = Pattern.compile("^(https?|file)\\:.*", Pattern.CASE_INSENSITIVE);
+                final Pattern uriRx = Pattern.compile("^(https?|file):.*", Pattern.CASE_INSENSITIVE);
                 if (uriRx.matcher(filePath).matches()) {
                     deleteTempFile = true;
                     file = getSettings().getTempFile("hint", "xml");
@@ -273,26 +271,38 @@ public class HintAnalyzer extends AbstractAnalyzer {
                     try {
                         downloader.fetchFile(url, file, false);
                     } catch (DownloadFailedException ex) {
-                        downloader.fetchFile(url, file, true);
+                        try {
+                            Thread.sleep(500);
+                            downloader.fetchFile(url, file, true);
+                        } catch (TooManyRequestsException ex1) {
+                            throw new HintParseException("Unable to download hint file `" + file + "`; received 429 - too many requests", ex1);
+                        } catch (ResourceNotFoundException ex1) {
+                            throw new HintParseException("Unable to download hint file `" + file + "`; received 404 - resource not found", ex1);
+                        } catch (InterruptedException ex1) {
+                            Thread.currentThread().interrupt();
+                            throw new HintParseException("Unable to download hint file `" + file + "`", ex1);
+                        }
+                    } catch (TooManyRequestsException ex) {
+                        throw new HintParseException("Unable to download hint file `" + file + "`; received 429 - too many requests", ex);
+                    } catch (ResourceNotFoundException ex) {
+                        throw new HintParseException("Unable to download hint file `" + file + "`; received 404 - resource not found", ex);
                     }
                 } else {
                     file = new File(filePath);
                     if (!file.exists()) {
                         try (InputStream fromClasspath = FileUtils.getResourceAsStream(filePath)) {
-                            if (fromClasspath != null) {
-                                deleteTempFile = true;
-                                file = getSettings().getTempFile("hint", "xml");
-                                try {
-                                    org.apache.commons.io.FileUtils.copyInputStreamToFile(fromClasspath, file);
-                                } catch (IOException ex) {
-                                    throw new HintParseException("Unable to locate hints file in classpath", ex);
-                                }
-                            }
+                            deleteTempFile = true;
+                            file = getSettings().getTempFile("hint", "xml");
+                            Files.copy(fromClasspath, file.toPath());
+                        } catch (IOException ex) {
+                            throw new HintParseException("Unable to locate hints file in classpath", ex);
                         }
                     }
                 }
 
-                if (file != null) {
+                if (file == null) {
+                    throw new HintParseException("Unable to locate hints file:" + filePath);
+                } else {
                     try {
                         parser.parseHints(file);
                         if (parser.getHintRules() != null && !parser.getHintRules().isEmpty()) {
@@ -320,8 +330,8 @@ public class HintAnalyzer extends AbstractAnalyzer {
                 }
             }
         }
-        hints = localHints.toArray(new HintRule[localHints.size()]);
-        vendorHints = localVendorHints.toArray(new VendorDuplicatingHintRule[localVendorHints.size()]);
+        hints = localHints.toArray(new HintRule[0]);
+        vendorHints = localVendorHints.toArray(new VendorDuplicatingHintRule[0]);
         LOGGER.debug("{} hint rules were loaded.", hints.length);
         LOGGER.debug("{} duplicating hint rules were loaded.", vendorHints.length);
     }

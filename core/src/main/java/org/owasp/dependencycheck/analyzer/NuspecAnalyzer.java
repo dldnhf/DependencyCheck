@@ -17,11 +17,13 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.data.nuget.NugetPackage;
 import org.owasp.dependencycheck.data.nuget.NuspecParseException;
-import org.owasp.dependencycheck.data.nuget.NuspecParser;
 import org.owasp.dependencycheck.data.nuget.XPathNuspecParser;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
@@ -34,7 +36,10 @@ import java.io.FileFilter;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import javax.annotation.concurrent.ThreadSafe;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
 import org.owasp.dependencycheck.exception.InitializationException;
 
 /**
@@ -49,7 +54,7 @@ public class NuspecAnalyzer extends AbstractFileTypeAnalyzer {
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "NuGet";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.DOTNET;
 
     /**
      * The logger.
@@ -138,8 +143,8 @@ public class NuspecAnalyzer extends AbstractFileTypeAnalyzer {
     public void analyzeDependency(Dependency dependency, Engine engine) throws AnalysisException {
         LOGGER.debug("Checking Nuspec file {}", dependency);
         try {
-            final NuspecParser parser = new XPathNuspecParser();
-            NugetPackage np = null;
+            final XPathNuspecParser parser = new XPathNuspecParser();
+            final NugetPackage np;
             try (FileInputStream fis = new FileInputStream(dependency.getActualFilePath())) {
                 np = parser.parse(fis);
             } catch (NuspecParseException | FileNotFoundException ex) {
@@ -153,8 +158,18 @@ public class NuspecAnalyzer extends AbstractFileTypeAnalyzer {
             dependency.addEvidence(EvidenceType.VENDOR, "nuspec", "authors", np.getAuthors(), Confidence.HIGH);
             dependency.addEvidence(EvidenceType.VERSION, "nuspec", "version", np.getVersion(), Confidence.HIGHEST);
             dependency.addEvidence(EvidenceType.PRODUCT, "nuspec", "id", np.getId(), Confidence.HIGHEST);
+            dependency.addEvidence(EvidenceType.VENDOR, "nuspec", "description", np.getDescription(), Confidence.LOW);
+            dependency.addEvidence(EvidenceType.PRODUCT, "nuspec", "description", np.getDescription(), Confidence.LOW);
             dependency.setName(np.getId());
             dependency.setVersion(np.getVersion());
+            try {
+                final PackageURL purl = PackageURLBuilder.aPackageURL().withType("nuget").withName(np.getId()).withVersion(np.getVersion()).build();
+                dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+            } catch (MalformedPackageURLException ex) {
+                LOGGER.debug("Unable to build package url for nuspec", ex);
+                final GenericIdentifier gid = new GenericIdentifier("nuspec:" + np.getId() + "@" + np.getVersion(), Confidence.HIGHEST);
+                dependency.addSoftwareIdentifier(gid);
+            }
             final String packagePath = String.format("%s:%s", np.getId(), np.getVersion());
             dependency.setPackagePath(packagePath);
             dependency.setDisplayFileName(packagePath);

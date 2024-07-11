@@ -20,7 +20,7 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
     <parent>
         <groupId>org.owasp</groupId>
         <artifactId>dependency-check-parent</artifactId>
-        <version>4.0.3-SNAPSHOT</version>
+        <version>10.0.3-SNAPSHOT</version>
     </parent>
     <artifactId>dependency-check-maven</artifactId>
     <packaging>maven-plugin</packaging>
@@ -28,16 +28,16 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
     <description>dependency-check-maven is a Maven Plugin that uses dependency-check-core to detect publicly disclosed vulnerabilities associated with the project's dependencies. The plugin will generate a report listing the dependency, any identified Common Platform Enumeration (CPE) identifiers, and the associated Common Vulnerability and Exposure (CVE) entries.</description>
     <inceptionYear>2013</inceptionYear>
     <properties>
-        <version.maven-plugin-plugin>3.6.0</version.maven-plugin-plugin>
+        <version.maven-plugin-plugin>3.13.1</version.maven-plugin-plugin>
     </properties>
     <scm>
         <connection>scm:git:https://github.com/jeremylong/DependencyCheck.git</connection>
-        <url>https://github.com/jeremylong/DependencyCheck/maven</url>
+        <url>https://github.com/jeremylong/DependencyCheck/tree/master/maven</url>
         <developerConnection>scm:git:git@github.com:jeremylong/DependencyCheck.git</developerConnection>
-        <tag>HEAD</tag>
+        <tag>v6.4.1</tag>
     </scm>
     <prerequisites>
-        <maven>${maven.api.version>}</maven>
+        <maven>3.1.0</maven>
     </prerequisites>
     <build>
         <resources>
@@ -64,7 +64,6 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
                 <artifactId>maven-plugin-plugin</artifactId>
                 <version>${version.maven-plugin-plugin}</version>
                 <configuration>
-                    <skipErrorNoDescriptorsFound>true</skipErrorNoDescriptorsFound>
                     <goalPrefix>dependency-check</goalPrefix>
                 </configuration>
                 <executions>
@@ -88,11 +87,8 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-plugin-plugin</artifactId>
+                <artifactId>maven-plugin-report-plugin</artifactId>
                 <version>${version.maven-plugin-plugin}</version>
-                <configuration>
-                    <goalPrefix>dependency-check</goalPrefix>
-                </configuration>
             </plugin>
         </plugins>
     </reporting>
@@ -106,6 +102,14 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
             <groupId>org.owasp</groupId>
             <artifactId>dependency-check-utils</artifactId>
             <version>${project.parent.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-jcs3-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.github.jeremylong</groupId>
+            <artifactId>jcs3-slf4j</artifactId>
         </dependency>
         <dependency>
             <groupId>org.apache.maven</groupId>
@@ -126,6 +130,14 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
             <groupId>org.apache.maven.shared</groupId>
             <artifactId>file-management</artifactId>
         </dependency>
+        <dependency><!--upgrade transitive dependency due to reported vulns-->
+            <groupId>org.codehaus.plexus</groupId>
+            <artifactId>plexus-utils</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.codehaus.plexus</groupId>
+            <artifactId>plexus-xml</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.maven.plugin-tools</groupId>
             <artifactId>maven-plugin-annotations</artifactId>
@@ -142,12 +154,6 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
         <dependency>
             <groupId>org.apache.maven.shared</groupId>
             <artifactId>maven-dependency-tree</artifactId>
-            <version>3.0.1</version>
-        </dependency>
-        <dependency>
-            <groupId>org.jmockit</groupId>
-            <artifactId>jmockit</artifactId>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.apache.maven.plugin-testing</groupId>
@@ -157,6 +163,16 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
         <dependency>
             <groupId>org.apache.maven.shared</groupId>
             <artifactId>maven-artifact-transfer</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.maven</groupId>
+            <artifactId>maven-model</artifactId>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.maven</groupId>
+            <artifactId>maven-artifact</artifactId>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
     <profiles>
@@ -170,36 +186,12 @@ Copyright (c) 2013 Jeremy Long. All Rights Reserved.
             <build>
                 <plugins>
                     <plugin>
-                        <groupId>org.codehaus.gmavenplus</groupId>
-                        <artifactId>gmavenplus-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>add-dynamic-properties-integ</id>
-                                <phase>pre-integration-test</phase>
-                                <goals>
-                                    <goal>execute</goal>
-                                </goals>
-                                <configuration>
-                                    <scripts>
-                                        <script><![CDATA[
-                                        if (project.properties!=null && project.properties.failsafeArgLine!=null) {
-                                            project.properties['invoker.mavenOpts']=project.properties.failsafeArgLine
-                                        }
-                                        ]]></script>
-                                    </scripts>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                    <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-invoker-plugin</artifactId>
                         <configuration>
                             <!--streamLogs>true</streamLogs-->
                             <parallelThreads>4</parallelThreads>
-                            <!--setupIncludes>
-                                <setupInclude>690-threadsafety/pom.xml</setupInclude>
-                            </setupIncludes-->
+                            <mavenOpts>${failsafeArgLine}</mavenOpts>
                             <cloneProjectsTo>${project.build.directory}/it</cloneProjectsTo>
                             <localRepositoryPath>target/local-repo</localRepositoryPath>
                             <properties>

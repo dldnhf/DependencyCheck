@@ -18,10 +18,12 @@
 package org.owasp.dependencycheck.xml.pom;
 
 import java.io.File;
+import java.util.jar.JarFile;
 
 import org.junit.Test;
 import static org.junit.Assert.*;
 import org.owasp.dependencycheck.BaseTest;
+import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 
 /**
  * Test the PomUtils object.
@@ -52,6 +54,30 @@ public class PomUtilsTest extends BaseTest {
         expResult = "Main ø modified to test issue #710 and #801 (&amps;)";
         result = PomUtils.readPom(file);
         assertEquals(expResult, result.getName());
+
+        file = BaseTest.getResourceAsFile(this, "pom/mailapi-1.4.3_projectcomment.pom");
+        expResult = "JavaMail API jar";
+        result = PomUtils.readPom(file);
+        assertEquals(expResult, result.getName());
+    }
+
+    @Test
+    public void testReadPom_String_File() throws Exception {
+        File fileCommonValidator = BaseTest.getResourceAsFile(this, "commons-validator-1.4.0.jar");
+        JarFile jar = new JarFile(fileCommonValidator, false);
+        String expResult = "Commons Validator";
+        Model result = PomUtils.readPom("META-INF/maven/commons-validator/commons-validator/pom.xml", jar);
+        assertEquals(expResult, result.getName());
+    }
+
+    @Test
+    public void testReadPom_should_trim_version() throws AnalysisException {
+        File input = BaseTest.getResourceAsFile(this, "pom/pom-with-new-line.xml");
+        String expectedOutputVersion = "2.2.0";
+
+        Model output = PomUtils.readPom(input);
+
+        assertEquals(expectedOutputVersion, output.getVersion());
     }
 
 }

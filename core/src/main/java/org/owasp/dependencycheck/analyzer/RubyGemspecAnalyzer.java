@@ -17,27 +17,32 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import java.io.File;
-import java.io.FileFilter;
-import java.io.FilenameFilter;
-import java.io.IOException;
-import java.nio.charset.Charset;
-import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import javax.annotation.concurrent.ThreadSafe;
-
-import org.apache.commons.io.FileUtils;
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
 import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.Settings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.concurrent.ThreadSafe;
+import java.io.File;
+import java.io.FileFilter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Used to analyze Ruby Gem specifications and collect information that can be
@@ -54,7 +59,7 @@ public class RubyGemspecAnalyzer extends AbstractFileTypeAnalyzer {
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "Ruby.Bundle";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.RUBY;
     /**
      * The logger.
      */
@@ -138,7 +143,7 @@ public class RubyGemspecAnalyzer extends AbstractFileTypeAnalyzer {
         dependency.setEcosystem(DEPENDENCY_ECOSYSTEM);
         String contents;
         try {
-            contents = FileUtils.readFileToString(dependency.getActualFile(), Charset.defaultCharset());
+            contents = new String(Files.readAllBytes(dependency.getActualFile().toPath()), StandardCharsets.UTF_8);
         } catch (IOException e) {
             throw new AnalysisException(
                     "Problem occurred while reading dependency file.", e);
@@ -183,6 +188,25 @@ public class RubyGemspecAnalyzer extends AbstractFileTypeAnalyzer {
         if (dependency.getName() != null && dependency.getVersion() != null) {
             dependency.setDisplayFileName(String.format("%s:%s", dependency.getName(), dependency.getVersion()));
         }
+
+        try {
+            final PackageURLBuilder builder = PackageURLBuilder.aPackageURL().withType("gem").withName(dependency.getName());
+            if (dependency.getVersion() != null) {
+                builder.withVersion(dependency.getVersion());
+            }
+            final PackageURL purl = builder.build();
+            dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+        } catch (MalformedPackageURLException ex) {
+            LOGGER.debug("Unable to build package url for python", ex);
+            final GenericIdentifier id;
+            if (dependency.getVersion() != null) {
+                id = new GenericIdentifier("gem:" + dependency.getName() + "@" + dependency.getVersion(), Confidence.HIGHEST);
+            } else {
+                id = new GenericIdentifier("gem:" + dependency.getName(), Confidence.HIGHEST);
+            }
+            dependency.addSoftwareIdentifier(id);
+        }
+
         setPackagePath(dependency);
     }
 
@@ -235,18 +259,13 @@ public class RubyGemspecAnalyzer extends AbstractFileTypeAnalyzer {
         String version = null;
         int versionCount = 0;
         if (parentDir != null) {
-            final File[] matchingFiles = parentDir.listFiles(new FilenameFilter() {
-                @Override
-                public boolean accept(File dir, String name) {
-                    return name.contains(VERSION_FILE_NAME);
-                }
-            });
+            final File[] matchingFiles = parentDir.listFiles((dir, name) -> name.contains(VERSION_FILE_NAME));
             if (matchingFiles == null) {
                 return null;
             }
             for (File f : matchingFiles) {
                 try {
-                    final List<String> lines = FileUtils.readLines(f, Charset.defaultCharset());
+                    final List<String> lines = Files.readAllLines(f.toPath(), StandardCharsets.UTF_8);
                     if (lines.size() == 1) { //TODO other checking?
                         final String value = lines.get(0).trim();
                         if (version == null || !version.equals(value)) {

@@ -17,13 +17,17 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
+import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.Checksum;
+import org.owasp.dependencycheck.utils.DependencyVersion;
+import org.owasp.dependencycheck.utils.DependencyVersionUtil;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.Settings;
 import org.slf4j.Logger;
@@ -32,11 +36,15 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.owasp.dependencycheck.dependency.EvidenceType;
-import org.owasp.dependencycheck.exception.InitializationException;
 
 /**
  * <p>
@@ -59,7 +67,7 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "CMAKE";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.NATIVE;
 
     /**
      * The logger.
@@ -70,22 +78,33 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
      * Used when compiling file scanning regex patterns.
      */
     private static final int REGEX_OPTIONS = Pattern.DOTALL | Pattern.CASE_INSENSITIVE | Pattern.MULTILINE;
-
+    /**
+     * Regex to obtain the project version.
+     */
+    private static final Pattern PROJECT_VERSION = Pattern.compile("^\\s*set\\s*\\(\\s*VERSION\\s*\"([^\"]*)\"\\)",
+            REGEX_OPTIONS);
+    /**
+     * Regex to obtain variables.
+     */
+    private static final Pattern SET_VAR_REGEX = Pattern.compile(
+            "^\\s*set\\s*\\(\\s*([a-zA-Z\\d_\\-]*)\\s+\"?([a-zA-Z\\d_\\-.${}]*)\"?\\s*\\)", REGEX_OPTIONS);
+    /**
+     * Regex to find inlined variables to replace them.
+     */
+    private static final Pattern INL_VAR_REGEX = Pattern.compile("(\\$\\s*\\{([^}]*)\\s*})", REGEX_OPTIONS);
     /**
      * Regex to extract the product information.
      */
-    private static final Pattern PROJECT = Pattern.compile(
-            "^ *project *\\([ \\n]*(\\w+)[ \\n]*.*?\\)", REGEX_OPTIONS);
+    private static final Pattern PROJECT = Pattern.compile("^ *project *\\([ \\n]*(\\w+)[ \\n]*.*?\\)", REGEX_OPTIONS);
 
     /**
      * Regex to extract product and version information.
      *
-     * Group 1: Product
-     *
-     * Group 2: Version
+     * <p>Group 1: Product</p>
+     * <p>Group 2: Version</p>
      */
-    private static final Pattern SET_VERSION = Pattern.compile(
-            "^ *set\\s*\\(\\s*(\\w+)_version\\s+\"?(\\d+(?:\\.\\d+)+)[\\s\"]?\\)", REGEX_OPTIONS);
+    private static final Pattern SET_VERSION = Pattern
+            .compile("^\\s*set\\s*\\(\\s*(\\w+)_version\\s+\"?([^\")]*)\\s*\"?\\)", REGEX_OPTIONS);
 
     /**
      * Detects files that can be analyzed.
@@ -150,13 +169,41 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
         final String name = file.getName();
         final String contents;
         try {
-            contents = FileUtils.readFileToString(file, Charset.defaultCharset()).trim();
+            contents = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8).trim();
         } catch (IOException e) {
             throw new AnalysisException(
                     "Problem occurred while reading dependency file.", e);
         }
         if (StringUtils.isNotBlank(contents)) {
-            final Matcher m = PROJECT.matcher(contents);
+            final Map<String, String> vars = collectDefinedVariables(contents);
+
+            String contentsReplacer = contents;
+            Matcher r = INL_VAR_REGEX.matcher(contents);
+            while (r.find()) {
+                boolean leastOne = false;
+                if (vars.containsKey(r.group(2))) {
+                    if (!vars.get(r.group(2)).contains(r.group(2))) {
+                        contentsReplacer = contentsReplacer.replace(r.group(1), vars.get(r.group(2)));
+                        r = INL_VAR_REGEX.matcher(contentsReplacer);
+                        leastOne = true;
+                    }
+                }
+                while (r.find()) {
+                    if (vars.containsKey(r.group(2))) {
+                        if (!vars.get(r.group(2)).contains(r.group(2))) {
+                            contentsReplacer = contentsReplacer.replace(r.group(1), vars.get(r.group(2)));
+                            r = INL_VAR_REGEX.matcher(contentsReplacer);
+                            leastOne = true;
+                        }
+                    }
+                }
+                if (!leastOne) {
+                    break;
+                }
+                r = INL_VAR_REGEX.matcher(contentsReplacer);
+            }
+            final String contentsReplaced = contentsReplacer;
+            final Matcher m = PROJECT.matcher(contentsReplaced);
             int count = 0;
             while (m.find()) {
                 count++;
@@ -168,10 +215,53 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
                 dependency.addEvidence(EvidenceType.PRODUCT, name, "Project", group, Confidence.HIGH);
                 dependency.addEvidence(EvidenceType.VENDOR, name, "Project", group, Confidence.HIGH);
                 dependency.setName(group);
+                dependency.setDisplayFileName(group);
+            }
+            if (count > 0) {
+                dependency.addEvidence(EvidenceType.VENDOR, "CmakeAnalyzer", "hint", "gnu", Confidence.MEDIUM);
             }
             LOGGER.debug("Found {} matches.", count);
-            analyzeSetVersionCommand(dependency, engine, contents);
+            final Matcher mVersion = PROJECT_VERSION.matcher(contentsReplaced);
+            while (mVersion.find()) {
+                LOGGER.debug(String.format(
+                        "Found set version command match with %d groups: %s",
+                        mVersion.groupCount(), mVersion.group(0)));
+                final String group = mVersion.group(1);
+                LOGGER.debug("Group 1: {}", group);
+                dependency.addEvidence(EvidenceType.VERSION, name, "VERSION", group, Confidence.HIGH);
+                final DependencyVersion vers = DependencyVersionUtil.parseVersion(group, true);
+                if (vers != null) {
+                    dependency.setVersion(vers.toString());
+                }
+            }
+
+            analyzeSetVersionCommand(dependency, engine, contentsReplaced);
         }
+    }
+
+    /**
+     * Collect defined CMake variables
+     *
+     * @param contents the version information
+     *
+     * @return a map referencing identified variables
+     */
+    private Map<String, String> collectDefinedVariables(String contents) {
+        final Map<String, String> vars = new HashMap<>();
+        final Matcher m = SET_VAR_REGEX.matcher(contents);
+        int count = 0;
+        while (m.find()) {
+            count++;
+            LOGGER.debug("Found set variable command match with {} groups: {}",
+                    m.groupCount(), m.group(0));
+            final String name = m.group(1);
+            final String value = m.group(2);
+            LOGGER.debug("Group 1: {}", name);
+            LOGGER.debug("Group 2: {}", value);
+            vars.put(name, value);
+        }
+        LOGGER.debug("Found {} matches.", count);
+        return removeSelfReferences(vars);
     }
 
     /**
@@ -200,9 +290,11 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
             if (product.startsWith(aliasPrefix)) {
                 product = product.replaceFirst(aliasPrefix, "");
             }
+            if (product.startsWith("_")) {
+                product = product.substring(1);
+            }
             if (count > 1) {
-                //TODO - refactor so we do not assign to the parameter (checkstyle)
-                currentDep = new Dependency(dependency.getActualFile());
+                currentDep = new Dependency(dependency.getActualFile(), true);
                 currentDep.setEcosystem(DEPENDENCY_ECOSYSTEM);
                 final String filePath = String.format("%s:%s", dependency.getFilePath(), product);
                 currentDep.setFilePath(filePath);
@@ -216,8 +308,31 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
             currentDep.addEvidence(EvidenceType.PRODUCT, source, "Product", product, Confidence.MEDIUM);
             currentDep.addEvidence(EvidenceType.VENDOR, source, "Vendor", product, Confidence.MEDIUM);
             currentDep.addEvidence(EvidenceType.VERSION, source, "Version", version, Confidence.MEDIUM);
-            currentDep.setName(product);
-            currentDep.setVersion(version);
+            if (product.toLowerCase().endsWith("lib")) {
+                currentDep = new Dependency(dependency.getActualFile(), true);
+                currentDep.setEcosystem(DEPENDENCY_ECOSYSTEM);
+                final String filePath = String.format("%s:%s", dependency.getFilePath(), product);
+                currentDep.setFilePath(filePath);
+
+                currentDep.setSha1sum(Checksum.getSHA1Checksum(filePath));
+                currentDep.setSha256sum(Checksum.getSHA256Checksum(filePath));
+                currentDep.setMd5sum(Checksum.getMD5Checksum(filePath));
+                engine.addDependency(currentDep);
+                product = "lib" + product.toLowerCase().substring(0, product.length() - 3);
+                currentDep.addEvidence(EvidenceType.PRODUCT, source, "Product", product, Confidence.MEDIUM);
+                currentDep.addEvidence(EvidenceType.VENDOR, source, "Vendor", product, Confidence.MEDIUM);
+                currentDep.addEvidence(EvidenceType.VERSION, source, "Version", version, Confidence.MEDIUM);
+            }
+            if (StringUtils.isBlank(currentDep.getName())) {
+                currentDep.setName(product);
+                currentDep.setDisplayFileName(product);
+            }
+            if (StringUtils.isBlank(currentDep.getVersion())) {
+                final DependencyVersion vers = DependencyVersionUtil.parseVersion(version, true);
+                if (vers != null) {
+                    currentDep.setVersion(vers.toString());
+                }
+            }
         }
         LOGGER.debug("Found {} matches.", count);
     }
@@ -225,5 +340,49 @@ public class CMakeAnalyzer extends AbstractFileTypeAnalyzer {
     @Override
     protected String getAnalyzerEnabledSettingKey() {
         return Settings.KEYS.ANALYZER_CMAKE_ENABLED;
+    }
+
+    /**
+     * This method prevents to generate an infinite loop when variables are
+     * initialized by other variables and end up forming an unresolvable
+     * chain.
+     *
+     * <p>This method takes the resolved variables map as an input and will return
+     * a new map, without the keys generating an infinite resolution chain.</p>
+     *
+     * @param vars variables initialization detected in the CMake build file
+     *
+     * @return a new map without infinite chain variables
+     */
+    Map<String, String> removeSelfReferences(final Map<String, String> vars) {
+        final Map<String, String> resolvedVars = new HashMap<>();
+
+        vars.forEach((key, value) -> {
+            if (!isVariableSelfReferencing(vars, key)) {
+                resolvedVars.put(key, value);
+            }
+        });
+
+        return resolvedVars;
+    }
+
+    private boolean isVariableSelfReferencing(Map<String, String> vars, String key) {
+        final List<String> resolutionChain = new ArrayList<>();
+        resolutionChain.add(key);
+
+        String nextKey = resolutionChain.get(0);
+        do {
+            final Matcher matcher = INL_VAR_REGEX.matcher(vars.get(nextKey));
+            if (!matcher.find()) {
+                break;
+            }
+            nextKey = matcher.group(2);
+            if (Objects.nonNull(nextKey) && resolutionChain.contains(nextKey)) {
+                return true;
+            }
+            resolutionChain.add(nextKey);
+        } while (Objects.nonNull(nextKey) && vars.containsKey(nextKey) && !key.equals(nextKey));
+
+        return resolutionChain.size() != 1 && key.equals(nextKey);
     }
 }

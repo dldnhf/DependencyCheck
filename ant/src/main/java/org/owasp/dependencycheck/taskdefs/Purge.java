@@ -17,12 +17,15 @@
  */
 package org.owasp.dependencycheck.taskdefs;
 
+import io.github.jeremylong.jcs3.slf4j.Slf4jAdapter;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+
 import org.apache.tools.ant.BuildException;
 import org.apache.tools.ant.Project;
 import org.apache.tools.ant.Task;
+import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.utils.Settings;
 import org.slf4j.impl.StaticLoggerBinder;
 
@@ -51,6 +54,11 @@ public class Purge extends Task {
      * occurs.
      */
     private boolean failOnError = true;
+
+    /**
+     * The URL to hosted suppressions file with base FP suppressions.
+     */
+    private String hostedSuppressionsUrl = null;
 
     /**
      * Construct a new DependencyCheckTask.
@@ -104,40 +112,75 @@ public class Purge extends Task {
     }
 
     /**
+     * Get the value of hostedSuppressionsUrl.
+     *
+     * @return the value of hostedSuppressionsUrl
+     */
+    public String getHostedSuppressionsUrl() {
+        return hostedSuppressionsUrl;
+    }
+
+    /**
+     * Set the value of hostedSuppressionsUrl.
+     *
+     * @param hostedSuppressionsUrl new value of hostedSuppressionsUrl
+     */
+    public void setHostedSuppressionsUrl(final String hostedSuppressionsUrl) {
+        this.hostedSuppressionsUrl = hostedSuppressionsUrl;
+    }
+
+    /**
+     * Sets the
+     * {@link Thread#getContextClassLoader() Thread Context Class Loader} to the
+     * one for this class, and then calls
+     * {@link #executeWithContextClassloader()}. This is done because the JCS
+     * cache needs to have the Thread Context Class Loader set to something that
+     * can resolve it's classes. Other build tools do this by default but Ant
+     * does not.
+     *
+     * @throws BuildException throws if there is a problem. See
+     * {@link #executeWithContextClassloader()} for details
+     */
+    @Override
+    public final void execute() throws BuildException {
+        muteNoisyLoggers();
+        final ClassLoader current = Thread.currentThread().getContextClassLoader();
+        try {
+            Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
+
+            executeWithContextClassloader();
+        } finally {
+            Thread.currentThread().setContextClassLoader(current);
+        }
+    }
+
+    /**
+     * Hacky method of muting the noisy logging from JCS.
+     */
+    private void muteNoisyLoggers() {
+        System.setProperty("jcs.logSystem", "slf4j");
+        Slf4jAdapter.muteLogging(true);
+
+        final String[] noisyLoggers = {
+            "org.apache.hc"
+        };
+        for (String loggerName : noisyLoggers) {
+            System.setProperty("org.slf4j.simpleLogger.log." + loggerName, "error");
+        }
+    }
+
+    /**
      * Executes the dependency-check purge to delete the existing local copy of
      * the NVD CVE data.
      *
      * @throws BuildException thrown if there is a problem deleting the file(s)
      */
-    @Override
-    public void execute() throws BuildException {
+    //see note on `Check.dealWithReferences()` for information on this suppression
+    @SuppressWarnings("squid:RedundantThrowsDeclarationCheck")
+    protected void executeWithContextClassloader() throws BuildException {
         populateSettings();
-        final File db;
-        try {
-            db = new File(settings.getDataDirectory(), "dc.h2.db");
-            if (db.exists()) {
-                if (db.delete()) {
-                    log("Database file purged; local copy of the NVD has been removed", Project.MSG_INFO);
-                } else {
-                    final String msg = String.format("Unable to delete '%s'; please delete the file manually", db.getAbsolutePath());
-                    if (this.failOnError) {
-                        throw new BuildException(msg);
-                    }
-                    log(msg, Project.MSG_ERR);
-                }
-            } else {
-                final String msg = String.format("Unable to purge database; the database file does not exist: %s", db.getAbsolutePath());
-                if (this.failOnError) {
-                    throw new BuildException(msg);
-                }
-                log(msg, Project.MSG_ERR);
-            }
-        } catch (IOException ex) {
-            final String msg = "Unable to delete the database";
-            if (this.failOnError) {
-                throw new BuildException(msg);
-            }
-            log(msg, Project.MSG_ERR);
+        try (Engine engine = new Engine(Engine.Mode.EVIDENCE_PROCESSING, getSettings())) {
+            engine.purge();
         } finally {
             settings.cleanup(true);
         }
@@ -150,6 +193,8 @@ public class Purge extends Task {
      *
      * @throws BuildException thrown if the properties file cannot be read.
      */
+    //see note on `Check.dealWithReferences()` for information on this suppression
+    @SuppressWarnings("squid:RedundantThrowsDeclarationCheck")
     protected void populateSettings() throws BuildException {
         settings = new Settings();
         try (InputStream taskProperties = this.getClass().getClassLoader().getResourceAsStream(PROPERTIES_FILE)) {
@@ -161,6 +206,7 @@ public class Purge extends Task {
             }
             log(msg, ex, Project.MSG_WARN);
         }
+        settings.setStringIfNotEmpty(Settings.KEYS.HOSTED_SUPPRESSIONS_URL, hostedSuppressionsUrl);
         if (dataDirectory != null) {
             settings.setString(Settings.KEYS.DATA_DIRECTORY, dataDirectory);
         } else {

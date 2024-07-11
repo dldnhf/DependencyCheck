@@ -21,10 +21,10 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
-import java.util.Map;
+import java.util.HashMap;
 import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
-import javax.xml.parsers.SAXParserFactory;
+import org.owasp.dependencycheck.utils.XmlUtils;
 import org.xml.sax.SAXException;
 
 /**
@@ -34,6 +34,7 @@ import org.xml.sax.SAXException;
  *
  * @author Jeremy Long
  */
+@SuppressWarnings("squid:S106")
 public final class App {
 
     /**
@@ -47,6 +48,7 @@ public final class App {
      *
      * @param args the command line arguments
      */
+    @SuppressWarnings("squid:S4823")
     public static void main(String[] args) {
         final File in;
         final File out;
@@ -58,12 +60,14 @@ public final class App {
         }
         in = new File(args[0]);
         if (!in.isFile()) {
-            System.err.println(String.format("%s does not exist", in.getAbsolutePath()));
+            System.err.printf("%s does not exist%n", in.getAbsolutePath());
             return;
         }
         out = new File("cwe.hashmap.serialized");
-        final Map<String, String> cwe = readCweData(args);
-        serializeCweData(cwe, out);
+        final HashMap<String, String> cwe = readCweData(args);
+        if (cwe != null) {
+            serializeCweData(cwe, out);
+        }
     }
 
     /**
@@ -72,22 +76,22 @@ public final class App {
      * @param files the array of files to parse
      * @return a map of the CWE data
      */
-    private static Map<String, String> readCweData(String[] files) {
+    private static HashMap<String, String> readCweData(String[] files) {
         try {
-            final SAXParserFactory factory = SAXParserFactory.newInstance();
-            final SAXParser saxParser = factory.newSAXParser();
+            final SAXParser saxParser = XmlUtils.buildSecureSaxParser();
             final CweHandler handler = new CweHandler();
             for (String f : files) {
                 final File in = new File(f);
                 if (!in.isFile()) {
-                    System.err.println(String.format("File not found %s", in));
+                    System.err.printf("File not found %s%n", in);
+                    return null;
                 }
-                System.out.println(String.format("Parsing %s", in));
+                System.out.printf("Parsing %s%n", in);
                 saxParser.parse(in, handler);
             }
             return handler.getCwe();
         } catch (SAXException | IOException | ParserConfigurationException ex) {
-            System.err.println(String.format("Error generating serialized data: %s", ex.getMessage()));
+            System.err.printf("Error generating serialized data: %s%n", ex.getMessage());
         }
         return null;
     }
@@ -98,15 +102,15 @@ public final class App {
      * @param cwe the CWE data
      * @param out the file output location
      */
-    private static void serializeCweData(Map<String, String> cwe, File out) {
+    private static void serializeCweData(HashMap<String, String> cwe, File out) {
         try (FileOutputStream fout = new FileOutputStream(out);
-                ObjectOutputStream objOut = new ObjectOutputStream(fout);) {
+                ObjectOutputStream objOut = new ObjectOutputStream(fout)) {
             System.out.println("Writing " + cwe.size() + " cwe entries.");
             objOut.writeObject(cwe);
-            System.out.println(String.format("Serialized CWE data written to %s", out.getCanonicalPath()));
+            System.out.printf("Serialized CWE data written to %s%n", out.getCanonicalPath());
             System.out.println("To update the ODC CWE data copy the serialized file to 'src/main/resources/data/cwe.hashmap.serialized'");
         } catch (IOException ex) {
-            System.err.println(String.format("Error generating serialized data: %s", ex.getMessage()));
+            System.err.printf("Error generating serialized data: %s%n", ex.getMessage());
         }
     }
 }

@@ -21,7 +21,8 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.List;
 import javax.annotation.concurrent.NotThreadSafe;
-import javax.xml.bind.DatatypeConverter;
+import org.owasp.dependencycheck.exception.ParseException;
+import org.owasp.dependencycheck.utils.DateUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.xml.sax.Attributes;
@@ -57,6 +58,10 @@ public class SuppressionHandler extends DefaultHandler {
      * The CVE element name.
      */
     public static final String CVE = "cve";
+    /**
+     * The vulnerabilityName element name.
+     */
+    public static final String VULNERABILITY_NAME = "vulnerabilityName";
 
     /**
      * The CVE element name.
@@ -75,6 +80,10 @@ public class SuppressionHandler extends DefaultHandler {
      * The GAV element name.
      */
     public static final String GAV = "gav";
+    /**
+     * The Package URL element name.
+     */
+    public static final String PACKAGE_URL = "packageUrl";
     /**
      * The cvssBelow element name.
      */
@@ -108,7 +117,7 @@ public class SuppressionHandler extends DefaultHandler {
     /**
      * Handles the start element event.
      *
-     * @param uri the uri of the element being processed
+     * @param uri the URI of the element being processed
      * @param localName the local name of the element being processed
      * @param qName the qName of the element being processed
      * @param attributes the attributes of the element being processed
@@ -128,7 +137,11 @@ public class SuppressionHandler extends DefaultHandler {
             }
             final String until = currentAttributes.getValue("until");
             if (until != null) {
-                rule.setUntil(DatatypeConverter.parseDate(until));
+                try {
+                    rule.setUntil(DateUtil.parseXmlDate(until));
+                } catch (ParseException ex) {
+                    throw new SAXException("Unable to parse until date in suppression file: " + until, ex);
+                }
             }
         }
     }
@@ -157,25 +170,31 @@ public class SuppressionHandler extends DefaultHandler {
                     rule.setFilePath(processPropertyType());
                     break;
                 case SHA1:
-                    rule.setSha1(currentText.toString());
+                    rule.setSha1(currentText.toString().trim());
                     break;
                 case GAV:
                     rule.setGav(processPropertyType());
+                    break;
+                case PACKAGE_URL:
+                    rule.setPackageUrl(processPropertyType());
                     break;
                 case CPE:
                     rule.addCpe(processPropertyType());
                     break;
                 case CWE:
-                    rule.addCwe(currentText.toString());
+                    rule.addCwe(currentText.toString().trim());
                     break;
                 case CVE:
-                    rule.addCve(currentText.toString());
+                    rule.addCve(currentText.toString().trim());
+                    break;
+                case VULNERABILITY_NAME:
+                    rule.addVulnerabilityName(processPropertyType());
                     break;
                 case NOTES:
-                    rule.addNotes(currentText.toString());
+                    rule.setNotes(currentText.toString().trim());
                     break;
                 case CVSS_BELOW:
-                    final float cvss = Float.parseFloat(currentText.toString());
+                    final Double cvss = Double.valueOf(currentText.toString().trim());
                     rule.addCvssBelow(cvss);
                     break;
                 default:
@@ -205,7 +224,7 @@ public class SuppressionHandler extends DefaultHandler {
      */
     private PropertyType processPropertyType() {
         final PropertyType pt = new PropertyType();
-        pt.setValue(currentText.toString());
+        pt.setValue(currentText.toString().trim());
         if (currentAttributes != null && currentAttributes.getLength() > 0) {
             final String regex = currentAttributes.getValue("regex");
             if (regex != null) {

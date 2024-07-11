@@ -20,9 +20,8 @@ package org.owasp.dependencycheck.data.nvdcve;
 import org.owasp.dependencycheck.BaseDBTestCase;
 import java.util.Properties;
 import org.junit.After;
-import org.junit.Test;
-import org.owasp.dependencycheck.data.update.nvd.NvdCveInfo;
 import static org.junit.Assert.assertEquals;
+import org.junit.Test;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import org.junit.Before;
@@ -40,6 +39,7 @@ public class DatabasePropertiesIT extends BaseDBTestCase {
     public void setUp() throws Exception {
         super.setUp();
         cveDb = new CveDB(getSettings());
+        cveDb.open();
     }
 
     @After
@@ -65,18 +65,16 @@ public class DatabasePropertiesIT extends BaseDBTestCase {
      */
     @Test
     public void testSave() throws Exception {
-        NvdCveInfo updatedValue = new NvdCveInfo();
         String key = "test";
-        long expected = 1337;
-        updatedValue.setId(key);
-        updatedValue.setTimestamp(expected);
+        String value = "something";
+        String expected = "something";
         DatabaseProperties instance = cveDb.getDatabaseProperties();
-        instance.save(updatedValue);
+        instance.save(key, value);
         instance = cveDb.reloadProperties();
-        long results = Long.parseLong(instance.getProperty("NVD CVE " + key));
+        String results = instance.getProperty(key);
         assertEquals(expected, results);
     }
-
+    
     /**
      * Test of getProperty method, of class DatabaseProperties.
      */
@@ -98,9 +96,10 @@ public class DatabasePropertiesIT extends BaseDBTestCase {
         String key = "version";
         DatabaseProperties instance = cveDb.getDatabaseProperties();
         String result = instance.getProperty(key);
-        double version = Double.parseDouble(result);
-        assertTrue(version >= 2.8);
-        assertTrue(version <= 10);
+        
+        int major = Integer.parseInt(result.substring(0, result.indexOf('.')));
+       
+        assertTrue(major >= 5);
     }
 
     /**

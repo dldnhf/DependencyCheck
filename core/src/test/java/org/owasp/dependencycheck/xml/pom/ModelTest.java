@@ -24,10 +24,11 @@ import java.util.Properties;
 import org.junit.Test;
 import static org.junit.Assert.*;
 import org.owasp.dependencycheck.BaseTest;
+import org.owasp.dependencycheck.utils.InterpolationUtil;
 
 /**
  *
- * @author jeremy
+ * @author jeremy long
  */
 public class ModelTest extends BaseTest {
 
@@ -270,30 +271,23 @@ public class ModelTest extends BaseTest {
      */
     @Test
     public void testProcessProperties() {
+
+        String text = "This is a test of '${key}' '${nested}'";
+        Model instance = new Model();
+        instance.setName(text);
+        instance.processProperties(null);
+        String expResults = "This is a test of '${key}' '${nested}'";
+        assertEquals(expResults, instance.getName());
+
         Properties prop = new Properties();
         prop.setProperty("key", "value");
         prop.setProperty("nested", "nested ${key}");
-        String text = "This is a test of '${key}' '${nested}'";
 
-        Model instance = new Model();
         instance.setName(text);
         instance.processProperties(prop);
-        String expResults = "This is a test of 'value' 'nested value'";
+        expResults = "This is a test of 'value' 'nested value'";
         assertEquals(expResults, instance.getName());
     }
 
-    /**
-     * Test of interpolateString method, of class Model.
-     */
-    @Test
-    public void testInterpolateString() {
-        Properties prop = new Properties();
-        prop.setProperty("key", "value");
-        prop.setProperty("nested", "nested ${key}");
-        String text = "This is a test of '${key}' '${nested}'";
-        String expResults = "This is a test of 'value' 'nested value'";
-        String results = Model.interpolateString(text, prop);
-        assertEquals(expResults, results);
-    }
 
 }

@@ -17,18 +17,33 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import org.apache.commons.io.FileUtils;
+import org.apache.commons.jcs3.access.exception.CacheException;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.analyzer.exception.UnexpectedAnalysisException;
+import org.owasp.dependencycheck.data.cache.DataCache;
+import org.owasp.dependencycheck.data.cache.DataCacheFactory;
 import org.owasp.dependencycheck.data.central.CentralSearch;
 import org.owasp.dependencycheck.data.nexus.MavenArtifact;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.Evidence;
+import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.exception.InitializationException;
+import org.owasp.dependencycheck.utils.DownloadFailedException;
+import org.owasp.dependencycheck.utils.Downloader;
+import org.owasp.dependencycheck.utils.FileFilterBuilder;
+import org.owasp.dependencycheck.utils.FileUtils;
+import org.owasp.dependencycheck.utils.InvalidSettingException;
+import org.owasp.dependencycheck.utils.ResourceNotFoundException;
+import org.owasp.dependencycheck.utils.Settings;
+import org.owasp.dependencycheck.utils.TooManyRequestsException;
+import org.owasp.dependencycheck.xml.pom.Model;
 import org.owasp.dependencycheck.xml.pom.PomUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.concurrent.ThreadSafe;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileNotFoundException;
@@ -37,14 +52,6 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.text.MessageFormat;
 import java.util.List;
-import javax.annotation.concurrent.ThreadSafe;
-import org.owasp.dependencycheck.dependency.EvidenceType;
-import org.owasp.dependencycheck.exception.InitializationException;
-import org.owasp.dependencycheck.utils.DownloadFailedException;
-import org.owasp.dependencycheck.utils.Downloader;
-import org.owasp.dependencycheck.utils.FileFilterBuilder;
-import org.owasp.dependencycheck.utils.InvalidSettingException;
-import org.owasp.dependencycheck.utils.Settings;
 
 /**
  * Analyzer which will attempt to locate a dependency, and the GAV information,
@@ -95,6 +102,10 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
      * The searcher itself.
      */
     private CentralSearch searcher;
+    /**
+     * A reference to the cache for POM model data collected from Central.
+     */
+    private DataCache<Model> cache;
 
     /**
      * Initializes the analyzer with the configured settings.
@@ -106,6 +117,15 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
         super.initialize(settings);
         setEnabled(checkEnabled());
         numberOfRetries = getSettings().getInt(Settings.KEYS.ANALYZER_CENTRAL_RETRY_COUNT, numberOfRetries);
+        if (settings.getBoolean(Settings.KEYS.ANALYZER_CENTRAL_USE_CACHE, true)) {
+            try {
+                final DataCacheFactory factory = new DataCacheFactory(settings);
+                cache = factory.getPomCache();
+            } catch (CacheException ex) {
+                settings.setBoolean(Settings.KEYS.ANALYZER_CENTRAL_USE_CACHE, false);
+                LOGGER.debug("Error creating cache, disabling caching", ex);
+            }
+        }
     }
 
     /**
@@ -116,12 +136,7 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
      */
     @Override
     public boolean supportsParallelProcessing() {
-        try {
-            return getSettings().getBoolean(Settings.KEYS.ANALYZER_CENTRAL_PARALLEL_ANALYSIS, true);
-        } catch (InvalidSettingException ex) {
-            LOGGER.debug("Invalid setting for analyzer.central.parallel.analysis; using true.");
-        }
-        return true;
+        return getSettings().getBoolean(Settings.KEYS.ANALYZER_CENTRAL_PARALLEL_ANALYSIS, true);
     }
 
     /**
@@ -131,24 +146,12 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
      * <code>false</code>
      */
     private boolean checkEnabled() {
-        boolean retVal = false;
-
         try {
-            if (getSettings().getBoolean(Settings.KEYS.ANALYZER_CENTRAL_ENABLED)) {
-                if (!getSettings().getBoolean(Settings.KEYS.ANALYZER_NEXUS_ENABLED)
-                        || NexusAnalyzer.DEFAULT_URL.equals(getSettings().getString(Settings.KEYS.ANALYZER_NEXUS_URL))) {
-                    LOGGER.debug("Enabling the Central analyzer");
-                    retVal = true;
-                } else {
-                    LOGGER.info("Nexus analyzer is enabled, disabling the Central Analyzer");
-                }
-            } else {
-                LOGGER.info("Central analyzer disabled");
-            }
+            return getSettings().getBoolean(Settings.KEYS.ANALYZER_CENTRAL_ENABLED);
         } catch (InvalidSettingException ise) {
             LOGGER.warn("Invalid setting. Disabling the Central analyzer");
         }
-        return retVal;
+        return false;
     }
 
     /**
@@ -238,29 +241,49 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
                                     + "this could result in undetected CPE/CVEs.", dependency.getFileName());
                             LOGGER.debug("Unable to delete temp file");
                         }
-                        LOGGER.debug("Downloading {}", ma.getPomUrl());
                         final Downloader downloader = new Downloader(getSettings());
                         final int maxAttempts = this.getSettings().getInt(Settings.KEYS.ANALYZER_CENTRAL_RETRY_COUNT, 3);
                         int retryCount = 0;
                         long sleepingTimeBetweenRetriesInMillis = BASE_RETRY_WAIT;
                         boolean success = false;
-                        do {
-                            //CSOFF: NestedTryDepth
-                            try {
-                                downloader.fetchFile(new URL(ma.getPomUrl()), pomFile);
-                                success = true;
-                            } catch (DownloadFailedException ex) {
+                        Model model = null;
+                        if (cache != null) {
+                            model = cache.get(ma.getPomUrl());
+                        }
+                        if (model != null) {
+                            success = true;
+                            LOGGER.debug("Cache hit for {}", ma.getPomUrl());
+                        } else {
+                            LOGGER.debug("Downloading {}", ma.getPomUrl());
+                            do {
+                                //CSOFF: NestedTryDepth
                                 try {
-                                    Thread.sleep(sleepingTimeBetweenRetriesInMillis);
+                                    downloader.fetchFile(new URL(ma.getPomUrl()), pomFile);
+                                    success = true;
+                                } catch (DownloadFailedException ex) {
+                                    try {
+                                        Thread.sleep(sleepingTimeBetweenRetriesInMillis);
+                                    } catch (InterruptedException ex1) {
+                                        Thread.currentThread().interrupt();
+                                        throw new UnexpectedAnalysisException(ex1);
+                                    }
                                     sleepingTimeBetweenRetriesInMillis *= 2;
-                                } catch (InterruptedException ex1) {
-                                    throw new RuntimeException(ex1);
+                                } catch (ResourceNotFoundException ex) {
+                                    LOGGER.debug("pom.xml does not exist in Central for {}", dependency.getFileName());
+                                    return;
+                                }
+                                //CSON: NestedTryDepth
+                            } while (!success && retryCount++ < maxAttempts);
+                        }
+                        if (success) {
+                            if (model == null) {
+                                model = PomUtils.readPom(pomFile);
+                                if (cache != null) {
+                                    cache.put(ma.getPomUrl(), model);
                                 }
                             }
-                            //CSON: NestedTryDepth
-                        } while (!success && retryCount++ < maxAttempts);
-                        if (success) {
-                            PomUtils.analyzePOM(dependency, pomFile);
+                            final boolean isMainPom = mas.size() == 1 || dependency.getActualFilePath().contains(ma.getVersion());
+                            JarAnalyzer.setPomEvidence(dependency, model, null, isMainPom);
                         } else {
                             LOGGER.warn("Unable to download pom.xml for {} from Central; "
                                     + "this could result in undetected CPE/CVEs.", dependency.getFileName());
@@ -271,13 +294,18 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
                                 + "this could result in undetected CPE/CVEs.", dependency.getFileName()), ex);
 
                     } finally {
-                        if (pomFile != null && pomFile.exists() && !FileUtils.deleteQuietly(pomFile)) {
-                            LOGGER.debug("Failed to delete temporary pom file {}", pomFile.toString());
+                        if (pomFile != null && pomFile.exists() && !FileUtils.delete(pomFile)) {
+                            LOGGER.debug("Failed to delete temporary pom file {}", pomFile);
                             pomFile.deleteOnExit();
                         }
                     }
                 }
             }
+        } catch (TooManyRequestsException tre) {
+            this.setEnabled(false);
+            final String message = "Connections to Central search refused. Analysis failed.";
+            LOGGER.error(message, tre);
+            throw new AnalysisException(message, tre);
         } catch (IllegalArgumentException iae) {
             LOGGER.info("invalid sha1-hash on {}", dependency.getFileName());
         } catch (FileNotFoundException fnfe) {
@@ -300,8 +328,10 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
      * @return the downloaded list of MavenArtifacts
      * @throws FileNotFoundException if the specified artifact is not found
      * @throws IOException if connecting to MavenCentral finally failed
+     * @throws TooManyRequestsException if Central has received too many
+     * requests.
      */
-    protected List<MavenArtifact> fetchMavenArtifacts(Dependency dependency) throws IOException {
+    protected List<MavenArtifact> fetchMavenArtifacts(Dependency dependency) throws IOException, TooManyRequestsException {
         IOException lastException = null;
         long sleepingTimeBetweenRetriesInMillis = BASE_RETRY_WAIT;
         int triesLeft = numberOfRetries;
@@ -319,10 +349,11 @@ public class CentralAnalyzer extends AbstractFileTypeAnalyzer {
                 if (triesLeft > 0) {
                     try {
                         Thread.sleep(sleepingTimeBetweenRetriesInMillis);
-                        sleepingTimeBetweenRetriesInMillis *= 2;
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
+                        throw new UnexpectedAnalysisException(e);
                     }
+                    sleepingTimeBetweenRetriesInMillis *= 2;
                 }
             }
         }

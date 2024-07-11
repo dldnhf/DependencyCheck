@@ -58,7 +58,8 @@ public class FileNameAnalyzer extends AbstractAnalyzer {
         "packages.config",
         "Package.swift",
         "classes.jar",
-        "build.gradle"}, IOCase.INSENSITIVE);
+        "build.gradle",
+        "CMakeLists.txt"}, IOCase.INSENSITIVE);
     //CSON: WhitespaceAfter
 
     //<editor-fold defaultstate="collapsed" desc="All standard implementation details of Analyzer">
@@ -129,7 +130,7 @@ public class FileNameAnalyzer extends AbstractAnalyzer {
                 if (version.getVersionParts() == null || version.getVersionParts().size() < 2) {
                     dependency.addEvidence(EvidenceType.VERSION, "file", "version", version.toString(), Confidence.MEDIUM);
                 } else {
-                    dependency.addEvidence(EvidenceType.VERSION, "file", "version", version.toString(), Confidence.HIGHEST);
+                    dependency.addEvidence(EvidenceType.VERSION, "file", "version", version.toString(), Confidence.HIGH);
                 }
                 dependency.addEvidence(EvidenceType.VERSION, "file", "name", packageName, Confidence.MEDIUM);
             }

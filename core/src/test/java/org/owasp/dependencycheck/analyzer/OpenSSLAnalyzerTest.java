@@ -27,7 +27,9 @@ import org.owasp.dependencycheck.dependency.Dependency;
 import java.io.File;
 
 import static org.hamcrest.CoreMatchers.containsString;
-import static org.junit.Assert.*;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import org.owasp.dependencycheck.dependency.EvidenceType;
 
 /**
@@ -88,7 +90,7 @@ public class OpenSSLAnalyzerTest extends BaseTest {
 
     @Test
     public void testVersionConstantExamples() {
-        final long[] constants = {0x1000203fL, 0x00903000, 0x00903001, 0x00903002l, 0x0090300f, 0x0090301f, 0x0090400f, 0x102031af};
+        final long[] constants = {0x1000203fL, 0x00903000L, 0x00903001L, 0x00903002L, 0x0090300fL, 0x0090301fL, 0x0090400fL, 0x102031afL};
         final String[] versions = {"1.0.2c",
             "0.9.3-dev",
             "0.9.3-beta1",

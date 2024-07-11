@@ -18,11 +18,11 @@
 package org.owasp.dependencycheck.analyzer;
 
 import java.io.File;
-import java.io.FilenameFilter;
 import javax.annotation.concurrent.ThreadSafe;
 
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.dependency.Dependency;
 
 /**
@@ -55,7 +55,7 @@ public class RubyBundlerAnalyzer extends RubyGemspecAnalyzer {
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "Ruby.Bundle";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.RUBY;
 
     /**
      * The name of the analyzer.
@@ -115,12 +115,7 @@ public class RubyBundlerAnalyzer extends RubyGemspecAnalyzer {
             final File parentDir = specificationsDir.getParentFile();
             final File gemsDir = new File(parentDir, GEMS);
             if (parentDir != null && parentDir.exists() && gemsDir.exists()) {
-                final File[] matchingFiles = gemsDir.listFiles(new FilenameFilter() {
-                    @Override
-                    public boolean accept(File dir, String name) {
-                        return name.equals(gemName);
-                    }
-                });
+                final File[] matchingFiles = gemsDir.listFiles((dir, name) -> name.equals(gemName));
 
                 if (matchingFiles != null && matchingFiles.length > 0) {
                     final String gemPath = matchingFiles[0].getAbsolutePath();

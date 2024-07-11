@@ -17,6 +17,7 @@
  */
 package org.owasp.dependencycheck.data.lucene;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
 import org.apache.lucene.analysis.Analyzer;
@@ -35,7 +36,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopScoreDocCollector;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.RAMDirectory;
+import org.apache.lucene.store.MMapDirectory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -53,7 +54,8 @@ public class FieldAnalyzerTest extends BaseTest {
     public void testAnalyzers() throws Exception {
 
         Analyzer analyzer = new SearchFieldAnalyzer();
-        Directory index = new RAMDirectory();
+        File temp = getSettings().getTempDirectory();
+        Directory index = new MMapDirectory(temp.toPath());
 
         String field1 = "product";
         String text1 = "springframework";
@@ -82,10 +84,11 @@ public class FieldAnalyzerTest extends BaseTest {
         Query q = parser.parse(querystr);
 
         int hitsPerPage = 10;
+        int hitsThreshold = 100;
 
         IndexReader reader = DirectoryReader.open(index);
         IndexSearcher searcher = new IndexSearcher(reader);
-        TopScoreDocCollector collector = TopScoreDocCollector.create(hitsPerPage);
+        TopScoreDocCollector collector = TopScoreDocCollector.create(hitsPerPage, hitsThreshold);
         searcher.search(q, collector);
         ScoreDoc[] hits = collector.topDocs().scoreDocs;
 
@@ -102,7 +105,7 @@ public class FieldAnalyzerTest extends BaseTest {
         querystr = "product:(  x-stream^5 )  AND  vendor:(  thoughtworks.xstream )";
         reset(searchAnalyzerProduct, searchAnalyzerVendor);
         Query q3 = parser.parse(querystr);
-        collector = TopScoreDocCollector.create(hitsPerPage);
+        collector = TopScoreDocCollector.create(hitsPerPage, hitsThreshold);
         searcher.search(q3, collector);
         hits = collector.topDocs().scoreDocs;
         assertEquals("x-stream", searcher.doc(hits[0].doc).get(field1));

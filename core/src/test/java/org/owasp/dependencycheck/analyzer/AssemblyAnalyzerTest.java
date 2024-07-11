@@ -18,14 +18,9 @@
 package org.owasp.dependencycheck.analyzer;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-
-import org.apache.commons.io.IOUtils;
 import org.junit.After;
 
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -35,14 +30,13 @@ import static org.junit.Assume.assumeNotNull;
 import org.junit.Before;
 import org.junit.Test;
 import org.owasp.dependencycheck.BaseTest;
-import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.analyzer.exception.UnexpectedAnalysisException;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.Evidence;
 import org.owasp.dependencycheck.dependency.EvidenceType;
 import org.owasp.dependencycheck.exception.InitializationException;
-import org.owasp.dependencycheck.utils.FileUtils;
 import org.owasp.dependencycheck.utils.Settings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -82,39 +76,15 @@ public class AssemblyAnalyzerTest extends BaseTest {
             } else {
                 LOGGER.warn("Exception setting up AssemblyAnalyzer. Tests will be incomplete");
             }
-            Assume.assumeNoException("Is mono installed? TESTS WILL BE INCOMPLETE", e);
+            Assume.assumeNoException("Is dotnet installed? TESTS WILL BE INCOMPLETE", e);
         }
     }
 
     private void assertGrokAssembly() throws IOException {
         // There must be an .exe and a .config files created in the temp
         // directory and they must match the resources they were created from.
-        File grokAssemblyExeFile = null;
-        File grokAssemblyConfigFile = null;
-
-        File tempDirectory = getSettings().getTempDirectory();
-        for (File file : tempDirectory.listFiles()) {
-            String filename = file.getName();
-            if (filename.startsWith("GKA") && filename.endsWith(".exe")) {
-                grokAssemblyExeFile = file;
-                break;
-            }
-        }
+        File grokAssemblyExeFile = analyzer.getGrokAssemblyPath();
         assertTrue("The GrokAssembly executable was not created.", grokAssemblyExeFile.isFile());
-        grokAssemblyConfigFile = new File(grokAssemblyExeFile.getPath() + ".config");
-        assertTrue("The GrokAssembly config was not created.", grokAssemblyConfigFile.isFile());
-
-        assertFileContent("The GrokAssembly executable has incorrect content.", "GrokAssembly.exe", grokAssemblyExeFile);
-        assertFileContent("The GrokAssembly config has incorrect content.", "GrokAssembly.exe.config", grokAssemblyConfigFile);
-    }
-
-    private void assertFileContent(String message, String expectedResourceName, File actualFile) throws IOException {
-        try (InputStream expectedStream = FileUtils.getResourceAsStream(expectedResourceName);
-                InputStream actualStream = new FileInputStream(actualFile)) {
-            byte[] expectedBytes = IOUtils.toByteArray(expectedStream);
-            byte[] actualBytes = IOUtils.toByteArray(actualStream);
-            assertArrayEquals(message, expectedBytes, actualBytes);
-        }
     }
 
     /**
@@ -128,11 +98,11 @@ public class AssemblyAnalyzerTest extends BaseTest {
     @Test
     public void testAnalysis() throws Exception {
         assumeNotNull(analyzer.buildArgumentList());
-        File f = BaseTest.getResourceAsFile(this, "GrokAssembly.exe");
+        File f = analyzer.getGrokAssemblyPath();
         Dependency d = new Dependency(f);
         analyzer.analyze(d, null);
-        assertTrue(d.contains(EvidenceType.VENDOR, new Evidence("grokassembly", "vendor", "OWASP", Confidence.HIGH)));
-        assertTrue(d.contains(EvidenceType.PRODUCT, new Evidence("grokassembly", "product", "GrokAssembly", Confidence.HIGH)));
+        assertTrue(d.contains(EvidenceType.VENDOR, new Evidence("grokassembly", "CompanyName", "OWASP Contributors", Confidence.HIGHEST)));
+        assertTrue(d.contains(EvidenceType.PRODUCT, new Evidence("grokassembly", "ProductName", "GrokAssembly", Confidence.HIGHEST)));
     }
 
     @Test
@@ -142,9 +112,11 @@ public class AssemblyAnalyzerTest extends BaseTest {
 
         Dependency d = new Dependency(f);
         analyzer.analyze(d, null);
-        assertTrue(d.contains(EvidenceType.VERSION, new Evidence("grokassembly", "version", "1.2.13.0", Confidence.HIGHEST)));
-        assertTrue(d.contains(EvidenceType.VENDOR, new Evidence("grokassembly", "vendor", "The Apache Software Foundation", Confidence.HIGH)));
-        assertTrue(d.contains(EvidenceType.PRODUCT, new Evidence("grokassembly", "product", "log4net", Confidence.HIGH)));
+        assertTrue(d.contains(EvidenceType.VERSION, new Evidence("grokassembly", "FileVersion", "1.2.13.0", Confidence.HIGH)));
+        assertEquals("1.2.13.0", d.getVersion());
+        assertTrue(d.contains(EvidenceType.VENDOR, new Evidence("grokassembly", "CompanyName", "The Apache Software Foundation", Confidence.HIGHEST)));
+        assertTrue(d.contains(EvidenceType.PRODUCT, new Evidence("grokassembly", "ProductName", "log4net", Confidence.HIGHEST)));
+        assertEquals("log4net", d.getName());
     }
 
     @Test
@@ -173,16 +145,12 @@ public class AssemblyAnalyzerTest extends BaseTest {
         //This test doesn't work on Windows.
         assumeFalse(System.getProperty("os.name").startsWith("Windows"));
 
-        String oldValue = getSettings().getString(Settings.KEYS.ANALYZER_ASSEMBLY_MONO_PATH);
+        String oldValue = getSettings().getString(Settings.KEYS.ANALYZER_ASSEMBLY_DOTNET_PATH);
         // if oldValue is null, that means that neither the system property nor the setting has
         // been set. If that's the case, then we have to make it such that when we recover,
         // null still comes back. But you can't put a null value in a HashMap, so we have to set
         // the system property rather than the setting.
-        if (oldValue == null) {
-            System.setProperty(Settings.KEYS.ANALYZER_ASSEMBLY_MONO_PATH, "/yooser/bine/mono");
-        } else {
-            getSettings().setString(Settings.KEYS.ANALYZER_ASSEMBLY_MONO_PATH, "/yooser/bine/mono");
-        }
+        System.setProperty(Settings.KEYS.ANALYZER_ASSEMBLY_DOTNET_PATH, "/yooser/bine/mono");
 
         String oldProp = System.getProperty(LOG_KEY, "info");
         try {
@@ -195,16 +163,16 @@ public class AssemblyAnalyzerTest extends BaseTest {
             aanalyzer.prepare(null);
             fail("Expected an InitializationException");
         } catch (InitializationException ae) {
-            assertEquals("An error occurred with the .NET AssemblyAnalyzer", ae.getMessage());
+            assertEquals("An error occurred with the .NET AssemblyAnalyzer, is the dotnet 8.0 runtime or sdk installed?", ae.getMessage());
         } finally {
             System.setProperty(LOG_KEY, oldProp);
             // Recover the logger
             // Now recover the way we came in. If we had to set a System property, delete it. Otherwise,
             // reset the old value
             if (oldValue == null) {
-                System.getProperties().remove(Settings.KEYS.ANALYZER_ASSEMBLY_MONO_PATH);
+                System.getProperties().remove(Settings.KEYS.ANALYZER_ASSEMBLY_DOTNET_PATH);
             } else {
-                getSettings().setString(Settings.KEYS.ANALYZER_ASSEMBLY_MONO_PATH, oldValue);
+                System.setProperty(Settings.KEYS.ANALYZER_ASSEMBLY_DOTNET_PATH, oldValue);
             }
         }
     }
@@ -215,7 +183,7 @@ public class AssemblyAnalyzerTest extends BaseTest {
         try {
             analyzer.closeAnalyzer();
         } catch (Exception ex) {
-            throw new RuntimeException(ex);
+            throw new UnexpectedAnalysisException(ex);
         } finally {
             super.tearDown();
         }

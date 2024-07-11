@@ -23,8 +23,6 @@ import java.util.List;
 import org.junit.Assert;
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
-import org.junit.Rule;
-import org.junit.rules.ExpectedException;
 import org.owasp.dependencycheck.BaseTest;
 
 /**
@@ -32,9 +30,6 @@ import org.owasp.dependencycheck.BaseTest;
  * @author Jeremy Long
  */
 public class HintParserTest extends BaseTest {
-
-    @Rule
-    public ExpectedException thrown= ExpectedException.none();
 
     /**
      * Test of parseHints method, of class HintParser.
@@ -51,18 +46,18 @@ public class HintParserTest extends BaseTest {
 
         assertEquals("One add product should have been read", 1, hintRules.get(0).getAddProduct().size());
         assertEquals("One add vendor should have been read", 1, hintRules.get(0).getAddVendor().size());
-        assertEquals("Two file name should have been read", 2, hintRules.get(1).getFilenames().size());
+        assertEquals("Two file name should have been read", 2, hintRules.get(1).getFileNames().size());
 
         assertEquals("add product name not found", "add product name", hintRules.get(0).getAddProduct().get(0).getName());
         assertEquals("add vendor name not found", "add vendor name", hintRules.get(0).getAddVendor().get(0).getName());
         assertEquals("given product name not found", "given product name", hintRules.get(0).getGivenProduct().get(0).getName());
         assertEquals("given vendor name not found", "given vendor name", hintRules.get(0).getGivenVendor().get(0).getName());
 
-        assertEquals("spring file name not found", "spring", hintRules.get(1).getFilenames().get(0).getValue());
-        assertEquals("file name 1 should not be case sensitive", false, hintRules.get(1).getFilenames().get(0).isCaseSensitive());
-        assertEquals("file name 1 should not be a regex", false, hintRules.get(1).getFilenames().get(0).isRegex());
-        assertEquals("file name 2 should be case sensitive", true, hintRules.get(1).getFilenames().get(1).isCaseSensitive());
-        assertEquals("file name 2 should be a regex", true, hintRules.get(1).getFilenames().get(1).isRegex());
+        assertEquals("spring file name not found", "spring", hintRules.get(1).getFileNames().get(0).getValue());
+        assertEquals("file name 1 should not be case sensitive", false, hintRules.get(1).getFileNames().get(0).isCaseSensitive());
+        assertEquals("file name 1 should not be a regex", false, hintRules.get(1).getFileNames().get(0).isRegex());
+        assertEquals("file name 2 should be case sensitive", true, hintRules.get(1).getFileNames().get(1).isCaseSensitive());
+        assertEquals("file name 2 should be a regex", true, hintRules.get(1).getFileNames().get(1).isRegex());
 
         assertEquals("sun duplicating vendor", "sun", vendorRules.get(0).getValue());
         assertEquals("sun duplicates vendor oracle", "oracle", vendorRules.get(0).getDuplicate());
@@ -81,12 +76,11 @@ public class HintParserTest extends BaseTest {
      */
     @Test
     public void testParseHintsXSDSelection() throws Exception {
-        thrown.expect(org.owasp.dependencycheck.xml.hints.HintParseException.class);
-        thrown.expectMessage("Line=7, Column=133: cvc-enumeration-valid: Value 'version' is not facet-valid with respect to enumeration '[vendor, product]'. It must be a value from the enumeration.");
         File file = BaseTest.getResourceAsFile(this, "hints_invalid.xml");
         HintParser instance = new HintParser();
-        instance.parseHints(file);
-        Assert.fail("A parser exception for an XML-schema violation should have been thrown");
+        Exception exception = Assert.assertThrows(org.owasp.dependencycheck.xml.hints.HintParseException.class, () -> instance.parseHints(file));
+        Assert.assertTrue(exception.getMessage().contains("Line=7, Column=133: cvc-enumeration-valid: Value 'version' is not facet-valid with respect to enumeration '[vendor, product]'. It must be a value from the enumeration."));
+
     }
 
     /**
@@ -148,9 +142,9 @@ public class HintParserTest extends BaseTest {
         InputStream ins = BaseTest.getResourceAsStream(this, "hints_13.xml");
         HintParser instance = new HintParser();
         instance.parseHints(ins);
-        List<VendorDuplicatingHintRule> vendor =  instance.getVendorDuplicatingHintRules();
+        List<VendorDuplicatingHintRule> vendor = instance.getVendorDuplicatingHintRules();
         List<HintRule> rules = instance.getHintRules();
-        
+
         assertEquals("Zero duplicating hints should have been read", 0, vendor.size());
         assertEquals("Two hint rules should have been read", 2, rules.size());
 

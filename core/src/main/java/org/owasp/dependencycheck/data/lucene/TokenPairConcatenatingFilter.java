@@ -101,8 +101,10 @@ public final class TokenPairConcatenatingFilter extends TokenFilter {
     }
 
     /**
-     * Resets the filter. This must be manually called between searching
-     * and indexing. Unable to rely on `reset` as it appears to be called between terms.
+     * Resets the filter. This must be manually called between searching and
+     * indexing. Unable to rely on `reset` as it appears to be called between
+     * terms.
+     *
      * @throws IOException thrown if there is an error reseting the tokenizer
      */
     public void clear() throws IOException {
@@ -128,14 +130,11 @@ public final class TokenPairConcatenatingFilter extends TokenFilter {
      */
     @Override
     public boolean equals(Object obj) {
-        if (obj == null) {
+        if (obj == null || !(obj instanceof TokenPairConcatenatingFilter)) {
             return false;
         }
-        if (obj == this) {
+        if (this == obj) {
             return true;
-        }
-        if (obj.getClass() != getClass()) {
-            return false;
         }
         final TokenPairConcatenatingFilter rhs = (TokenPairConcatenatingFilter) obj;
         return new EqualsBuilder()

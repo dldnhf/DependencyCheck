@@ -17,36 +17,54 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
+import com.esotericsoftware.minlog.Log;
+import com.github.packageurl.MalformedPackageURLException;
+import com.github.packageurl.PackageURL;
+import com.github.packageurl.PackageURLBuilder;
 import com.h3xstream.retirejs.repo.JsLibrary;
 import com.h3xstream.retirejs.repo.JsLibraryResult;
 import com.h3xstream.retirejs.repo.JsVulnerability;
 import com.h3xstream.retirejs.repo.ScannerFacade;
 import com.h3xstream.retirejs.repo.VulnerabilitiesRepository;
 import com.h3xstream.retirejs.repo.VulnerabilitiesRepositoryLoader;
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.validator.routines.UrlValidator;
+import org.json.JSONException;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
+import org.owasp.dependencycheck.data.nvdcve.DatabaseException;
+import org.owasp.dependencycheck.data.update.RetireJSDataSource;
+import org.owasp.dependencycheck.data.update.exception.UpdateException;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.EvidenceType;
+import org.owasp.dependencycheck.dependency.Reference;
 import org.owasp.dependencycheck.dependency.Vulnerability;
+import org.owasp.dependencycheck.dependency.naming.GenericIdentifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
+import org.owasp.dependencycheck.exception.InitializationException;
+import org.owasp.dependencycheck.exception.WriteLockException;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
 import org.owasp.dependencycheck.utils.Settings;
+import org.owasp.dependencycheck.utils.WriteLock;
+import org.owasp.dependencycheck.utils.search.FileContentSearch;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import javax.annotation.concurrent.ThreadSafe;
 import java.io.File;
 import java.io.FileFilter;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import javax.annotation.concurrent.ThreadSafe;
-import org.owasp.dependencycheck.data.nvdcve.DatabaseException;
-import org.owasp.dependencycheck.exception.InitializationException;
-import org.owasp.dependencycheck.utils.search.FileContentSearch;
+import org.apache.commons.io.IOUtils;
 
 /**
  * The RetireJS analyzer uses the manually curated list of vulnerabilities from
@@ -58,18 +76,17 @@ import org.owasp.dependencycheck.utils.search.FileContentSearch;
  * @author Steve Springett
  */
 @ThreadSafe
-@Experimental
 public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
 
-    /**
-     * The logger.
-     */
-    private static final Logger LOGGER = LoggerFactory.getLogger(RetireJsAnalyzer.class);
     /**
      * A descriptor for the type of dependencies processed or added by this
      * analyzer.
      */
-    public static final String DEPENDENCY_ECOSYSTEM = "js";
+    public static final String DEPENDENCY_ECOSYSTEM = Ecosystem.JAVASCRIPT;
+    /**
+     * The logger.
+     */
+    private static final Logger LOGGER = LoggerFactory.getLogger(RetireJsAnalyzer.class);
     /**
      * The name of the analyzer.
      */
@@ -101,6 +118,8 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
      * Flag indicating whether non-vulnerable JS should be excluded if they are
      * contained in a JAR.
      */
+    //TODO implement this
+    @SuppressWarnings("FieldMayBeFinal")
     private boolean skipNonVulnerableInJAR = true;
 
     /**
@@ -123,12 +142,13 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
     @Override
     public boolean accept(File pathname) {
         try {
-            final boolean filesMatched = super.getFilesMatched();
             final boolean accepted = super.accept(pathname);
+            if (accepted && !pathname.exists()) {
+                //file may not yet have been extracted from an archive
+                super.setFilesMatched(true);
+                return true;
+            }
             if (accepted && filters != null && FileContentSearch.contains(pathname, filters)) {
-                if (!filesMatched) {
-                    super.setFilesMatched(filesMatched);
-                }
                 return false;
             }
             return accepted;
@@ -160,19 +180,64 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
      */
     @Override
     protected void prepareFileTypeAnalyzer(Engine engine) throws InitializationException {
+        // RetireJS outputs a bunch of repeated output like the following for
+        // vulnerable dependencies, with little context:
+        //
+        // INFO: Vulnerability found: jquery below 1.6.3
+        //
+        // This logging is suppressed because it isn't particularly useful, and
+        // it aligns with other analyzers that don't log such information.
+        Log.set(Log.LEVEL_WARN);
+
         File repoFile = null;
+        boolean repoEmpty = false;
         try {
-            repoFile = new File(getSettings().getDataDirectory(), "jsrepository.json");
+            final String configuredUrl = getSettings().getString(Settings.KEYS.ANALYZER_RETIREJS_REPO_JS_URL, RetireJSDataSource.DEFAULT_JS_URL);
+            final URL url = new URL(configuredUrl);
+            final File filepath = new File(url.getPath());
+            repoFile = new File(getSettings().getDataDirectory(), filepath.getName());
+            if (!repoFile.isFile() || repoFile.length() <= 1L) {
+                LOGGER.warn("Retire JS repository is empty or missing - attempting to force the update");
+                repoEmpty = true;
+                getSettings().setBoolean(Settings.KEYS.ANALYZER_RETIREJS_FORCEUPDATE, true);
+            }
         } catch (FileNotFoundException ex) {
             this.setEnabled(false);
             throw new InitializationException(String.format("RetireJS repo does not exist locally (%s)", repoFile), ex);
         } catch (IOException ex) {
             this.setEnabled(false);
-            throw new InitializationException("Failed to initialize the RetireJS repo - data directory could not be created", ex);
+            throw new InitializationException("Failed to initialize the RetireJS", ex);
+        }
+
+        final boolean autoupdate = getSettings().getBoolean(Settings.KEYS.AUTO_UPDATE, true);
+        final boolean forceupdate = getSettings().getBoolean(Settings.KEYS.ANALYZER_RETIREJS_FORCEUPDATE, false);
+        if ((!autoupdate && forceupdate) || (autoupdate && repoEmpty)) {
+            final RetireJSDataSource ds = new RetireJSDataSource();
+            try {
+                ds.update(engine);
+            } catch (UpdateException ex) {
+                throw new InitializationException("Unable to initialize the Retire JS repository", ex);
+            }
+        }
+
+        //several users are reporting that the retire js repository is getting corrupted.
+        try (WriteLock lock = new WriteLock(getSettings(), true, repoFile.getName() + ".lock")) {
+            final File temp = getSettings().getTempDirectory();
+            final File tempRepo = new File(temp, repoFile.getName());
+            LOGGER.debug("copying retireJs repo {} to {}", repoFile.toPath(), tempRepo.toPath());
+            Files.copy(repoFile.toPath(), tempRepo.toPath());
+            repoFile = tempRepo;
+        } catch (WriteLockException | IOException ex) {
+            this.setEnabled(false);
+            throw new InitializationException("Failed to copy the RetireJS repo", ex);
         }
         try (FileInputStream in = new FileInputStream(repoFile)) {
             this.jsRepository = new VulnerabilitiesRepositoryLoader().loadFromInputStream(in);
-
+        } catch (JSONException ex) {
+            this.setEnabled(false);
+            throw new InitializationException("Failed to initialize the RetireJS repo: `" + repoFile
+                    + "` appears to be malformed. Please delete the file or run the dependency-check purge "
+                    + "command and re-try running dependency-check.", ex);
         } catch (IOException ex) {
             this.setEnabled(false);
             throw new InitializationException("Failed to initialize the RetireJS repo", ex);
@@ -220,19 +285,44 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
      */
     @Override
     public void analyzeDependency(Dependency dependency, Engine engine) throws AnalysisException {
-        try {
-            final byte[] fileContent = IOUtils.toByteArray(new FileInputStream(dependency.getActualFile()));
+        if (dependency.isVirtual()) {
+            return;
+        }
+        try (InputStream fis = new FileInputStream(dependency.getActualFile())) {
+            final byte[] fileContent = IOUtils.toByteArray(fis);
             final ScannerFacade scanner = new ScannerFacade(jsRepository);
-            final List<JsLibraryResult> results = scanner.scanScript(dependency.getActualFile().getAbsolutePath(), fileContent, 0);
-
+            final List<JsLibraryResult> results;
+            try {
+                results = scanner.scanScript(dependency.getActualFile().getAbsolutePath(), fileContent, 0);
+            } catch (StackOverflowError ex) {
+                final String msg = String.format("An error occured trying to analyze %s. "
+                        + "To resolve this error please try increasing the Java stack size to "
+                        + "8mb and re-run dependency-check:%n%n"
+                        + "(win) : set JAVA_OPTS=\"-Xss8192k\"%n"
+                        + "(*nix): export JAVA_OPTS=\"-Xss8192k\"%n%n",
+                        dependency.getDisplayFileName());
+                throw new AnalysisException(msg, ex);
+            }
             if (results.size() > 0) {
                 for (JsLibraryResult libraryResult : results) {
 
                     final JsLibrary lib = libraryResult.getLibrary();
                     dependency.setName(lib.getName());
                     dependency.setVersion(libraryResult.getDetectedVersion());
+                    try {
+                        final PackageURL purl = PackageURLBuilder.aPackageURL().withType("javascript")
+                                .withName(lib.getName()).withVersion(libraryResult.getDetectedVersion()).build();
+                        dependency.addSoftwareIdentifier(new PurlIdentifier(purl, Confidence.HIGHEST));
+                    } catch (MalformedPackageURLException ex) {
+                        LOGGER.debug("Unable to build package url for retireJS", ex);
+                        final GenericIdentifier id = new GenericIdentifier("javascript:" + lib.getName() + "@"
+                                + libraryResult.getDetectedVersion(), Confidence.HIGHEST);
+                        dependency.addSoftwareIdentifier(id);
+                    }
+
                     dependency.addEvidence(EvidenceType.VERSION, "file", "version", libraryResult.getDetectedVersion(), Confidence.HIGH);
                     dependency.addEvidence(EvidenceType.PRODUCT, "file", "name", libraryResult.getLibrary().getName(), Confidence.HIGH);
+                    dependency.addEvidence(EvidenceType.VENDOR, "file", "name", libraryResult.getLibrary().getName(), Confidence.HIGH);
 
                     final List<Vulnerability> vulns = new ArrayList<>();
                     final JsVulnerability jsVuln = libraryResult.getVuln();
@@ -259,22 +349,29 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
                                         vuln.setUnscoredSeverity(jsVuln.getSeverity());
                                         vuln.setSource(Vulnerability.Source.RETIREJS);
                                     }
-                                    for (String info : jsVuln.getInfo()) {
-                                        vuln.addReference("info", "info", info);
-                                    }
+                                    jsVuln.getInfo().stream().map((info) -> {
+                                        if (UrlValidator.getInstance().isValid(info)) {
+                                            return new Reference(info, "info", info);
+                                        }
+                                        return new Reference(info, "info", null);
+                                    }).forEach(vuln::addReference);
                                     vulns.add(vuln);
                                 }
                             } else if ("osvdb".equals(key)) {
-                                for (String osvdb : value) {
+                                //todo - convert to map/collect
+                                value.forEach((osvdb) -> {
                                     final Vulnerability vuln = new Vulnerability();
                                     vuln.setName(osvdb);
                                     vuln.setSource(Vulnerability.Source.RETIREJS);
                                     vuln.setUnscoredSeverity(jsVuln.getSeverity());
-                                    for (String info : jsVuln.getInfo()) {
-                                        vuln.addReference("info", "info", info);
-                                    }
+                                    jsVuln.getInfo().stream().map((info) -> {
+                                        if (UrlValidator.getInstance().isValid(info)) {
+                                            return new Reference(info, "info", info);
+                                        }
+                                        return new Reference(info, "info", null);
+                                    }).forEach(vuln::addReference);
                                     vulns.add(vuln);
-                                }
+                                });
                             }
                             dependency.addVulnerabilities(vulns);
                         }
@@ -289,34 +386,60 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
                             // CSOFF: NeedBraces
                             if (null != key) {
                                 switch (key) {
-                                    case "issue":
-                                        individualVuln.setName(libraryResult.getLibrary().getName() + " issue: " + value.get(0));
-                                        individualVuln.addReference(key, key, value.get(0));
-                                        break;
-                                    case "bug":
-                                        individualVuln.setName(libraryResult.getLibrary().getName() + " bug: " + value.get(0));
-                                        individualVuln.addReference(key, key, value.get(0));
-                                        break;
                                     case "summary":
                                         if (null == individualVuln.getName()) {
                                             individualVuln.setName(value.get(0));
                                         }
                                         individualVuln.setDescription(value.get(0));
                                         break;
-                                    case "release":
-                                        individualVuln.addReference(key, key, value.get(0));
+                                    case "issue":
+                                        individualVuln.setName(libraryResult.getLibrary().getName() + " issue: " + value.get(0));
+                                        if (UrlValidator.getInstance().isValid(value.get(0))) {
+                                            individualVuln.addReference(key, key, value.get(0));
+                                        } else {
+                                            individualVuln.addReference(key, value.get(0), null);
+                                        }
                                         break;
+                                    case "bug":
+                                        individualVuln.setName(libraryResult.getLibrary().getName() + " bug: " + value.get(0));
+                                        if (UrlValidator.getInstance().isValid(value.get(0))) {
+                                            individualVuln.addReference(key, key, value.get(0));
+                                        } else {
+                                            individualVuln.addReference(key, value.get(0), null);
+                                        }
+                                        break;
+                                    case "pr":
+                                        individualVuln.setName(libraryResult.getLibrary().getName() + " pr: " + value.get(0));
+                                        if (UrlValidator.getInstance().isValid(value.get(0))) {
+                                            individualVuln.addReference(key, key, value.get(0));
+                                        } else {
+                                            individualVuln.addReference(key, value.get(0), null);
+                                        }
+                                        break;
+                                    //case "release":
                                     default:
+                                        if (UrlValidator.getInstance().isValid(value.get(0))) {
+                                            individualVuln.addReference(key, key, value.get(0));
+                                        } else {
+                                            individualVuln.addReference(key, value.get(0), null);
+                                        }
                                         break;
                                 }
                             }
                             // CSON: NeedBraces
-                            individualVuln.setSource(Vulnerability.Source.RETIREJS);
-                            individualVuln.setUnscoredSeverity(jsVuln.getSeverity());
-                            for (String info : jsVuln.getInfo()) {
-                                individualVuln.addReference("info", "info", info);
-                            }
                         }
+                        if (StringUtils.isBlank(individualVuln.getName())) {
+                            individualVuln.setName("Vulnerability in " + libraryResult.getLibrary().getName());
+                        }
+                        individualVuln.setSource(Vulnerability.Source.RETIREJS);
+                        individualVuln.setUnscoredSeverity(jsVuln.getSeverity());
+                        jsVuln.getInfo().stream().map((info) -> {
+                            if (UrlValidator.getInstance().isValid(info)) {
+                                return new Reference(info, "info", info);
+                            }
+                            return new Reference(info, "info", null);
+                        }).forEach(individualVuln::addReference);
+
                         dependency.addVulnerability(individualVuln);
                     }
                 }
@@ -326,5 +449,10 @@ public class RetireJsAnalyzer extends AbstractFileTypeAnalyzer {
         } catch (IOException | DatabaseException e) {
             throw new AnalysisException(e);
         }
+    }
+
+    @Override
+    protected void closeAnalyzer() throws Exception {
+        Log.set(Log.LEVEL_INFO);
     }
 }

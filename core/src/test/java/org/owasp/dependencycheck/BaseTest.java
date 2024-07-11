@@ -15,6 +15,7 @@
  */
 package org.owasp.dependencycheck;
 
+import io.github.jeremylong.jcs3.slf4j.Slf4jAdapter;
 import java.io.File;
 import java.io.InputStream;
 import java.net.URISyntaxException;
@@ -29,7 +30,7 @@ import org.owasp.dependencycheck.utils.Settings;
  *
  * @author Jeremy Long
  */
-public class BaseTest {
+public abstract class BaseTest {
 
     /**
      * The configured settings.
@@ -41,6 +42,8 @@ public class BaseTest {
      */
     @Before
     public void setUp() throws Exception {
+        System.setProperty("jcs.logSystem", "slf4j");
+        Slf4jAdapter.muteLogging(true);
         settings = new Settings();
     }
 
@@ -54,7 +57,7 @@ public class BaseTest {
 
     @AfterClass
     public static void tearDownClass() throws Exception {
-        File f = new File("./target/data/dc.h2.db");
+        File f = new File("./target/data/odc.mv.db");
         if (f.exists() && f.isFile() && f.length() < 71680) {
             System.err.println("------------------------------------------------");
             System.err.println("------------------------------------------------");

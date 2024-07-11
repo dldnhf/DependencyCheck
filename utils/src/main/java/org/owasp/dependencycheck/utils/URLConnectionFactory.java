@@ -1,5 +1,5 @@
 /*
- * This file is part of dependency-check-core.
+ * This file is part of dependency-check-utils.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,9 +31,11 @@ import java.net.URL;
 import java.net.URLConnection;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
 import javax.net.ssl.HttpsURLConnection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * A URLConnection Factory to create new connections. This encapsulates several
@@ -67,11 +69,14 @@ public final class URLConnectionFactory {
      * configured to use a proxy this method will retrieve the proxy settings
      * and use them when setting up the connection.
      *
-     * @param url the url to connect to
+     * @param url the URL to connect to
      * @return an HttpURLConnection
-     * @throws URLConnectionFailureException thrown if there is an exception
+     * @throws org.owasp.dependencycheck.utils.URLConnectionFailureException
+     * thrown if there is an exception
      */
-    @SuppressFBWarnings(value = "RCN_REDUNDANT_NULLCHECK_OF_NULL_VALUE", justification = "Just being extra safe")
+    @SuppressWarnings("squid:S2583")
+    @SuppressFBWarnings(justification = "yes, there is a redundant null check in the catch - to suppress warnings we are leaving the null check",
+            value = {"RCN_REDUNDANT_NULLCHECK_OF_NULL_VALUE"})
     public HttpURLConnection createHttpURLConnection(URL url) throws URLConnectionFailureException {
         HttpURLConnection conn = null;
         final String proxyHost = settings.getString(Settings.KEYS.PROXY_SERVER);
@@ -90,12 +95,8 @@ public final class URLConnectionFactory {
                         public PasswordAuthentication getPasswordAuthentication() {
                             if (proxyHost.equals(getRequestingHost()) || getRequestorType().equals(Authenticator.RequestorType.PROXY)) {
                                 LOGGER.debug("Using the configured proxy username and password");
-                                try {
-                                    if (settings.getBoolean(Settings.KEYS.PROXY_DISABLE_SCHEMAS, true)) {
-                                        System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
-                                    }
-                                } catch (InvalidSettingException ex) {
-                                    LOGGER.trace("This exception can be ignored", ex);
+                                if (settings.getBoolean(Settings.KEYS.PROXY_DISABLE_SCHEMAS, true)) {
+                                    System.setProperty("jdk.http.auth.tunneling.disabledSchemes", "");
                                 }
                                 return new PasswordAuthentication(username, password.toCharArray());
                             }
@@ -111,7 +112,11 @@ public final class URLConnectionFactory {
                 conn = (HttpURLConnection) url.openConnection();
             }
             final int connectionTimeout = settings.getInt(Settings.KEYS.CONNECTION_TIMEOUT, 10000);
+            // set a conservative long default timeout to compensate for MITM-proxies that return the (final) bytes only
+            // after all security checks passed
+            final int readTimeout = settings.getInt(Settings.KEYS.CONNECTION_READ_TIMEOUT, 60_000);
             conn.setConnectTimeout(connectionTimeout);
+            conn.setReadTimeout(readTimeout);
             conn.setInstanceFollowRedirects(true);
         } catch (IOException ex) {
             if (conn != null) {
@@ -126,15 +131,65 @@ public final class URLConnectionFactory {
         //conn.setRequestProperty("user-agent",
         //  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/65.0.3325.181 Safari/537.36");
         configureTLS(url, conn);
+        addAuthenticationIfPresent(conn);
         return conn;
     }
 
     /**
-     * Check if hostname matches nonProxy settings
+     * Adds the basic authorization header if the URL contains a username and
+     * password. Example URL that will have the basic authorization header
+     * added:
+     * <code>http://username:password@passwordprotectednvdsite.internal/feeds/json/cve/1.1/nvdcve-1.1-modified.json.gz</code>
      *
-     * @param url the url to connect to
+     * @param conn the connection
+     */
+    private void addAuthenticationIfPresent(HttpURLConnection conn) {
+        final String userInfo = conn.getURL().getUserInfo();
+        if (userInfo != null) {
+            final String basicAuth = "Basic " + Base64.getEncoder().encodeToString(userInfo.getBytes(UTF_8));
+            if (LOGGER.isDebugEnabled()) {
+                LOGGER.debug("Adding user info as basic authorization");
+            }
+            conn.addRequestProperty("Authorization", basicAuth);
+        }
+    }
+
+    /**
+     * Adds a basic authentication header if the values in the settings are not
+     * null.
+     *
+     * @param conn the connection to add the basic auth header
+     * @param userKey the settings key for the username
+     * @param passwordKey the settings key for the password
+     */
+    public void addBasicAuthentication(HttpURLConnection conn, String userKey, String passwordKey) {
+        if (StringUtils.isNotEmpty(settings.getString(userKey))
+                && StringUtils.isNotEmpty(settings.getString(passwordKey))) {
+            final String user = settings.getString(userKey);
+            final String password = settings.getString(passwordKey);
+
+            if (user.isEmpty() || password.isEmpty()) {
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("Skip authentication as user and/or password is empty");
+                }
+            } else {
+                final String userColonPassword = user + ":" + password;
+                final String basicAuth = "Basic " + Base64.getEncoder().encodeToString(userColonPassword.getBytes(UTF_8));
+                if (LOGGER.isDebugEnabled()) {
+                    LOGGER.debug("Adding user/password from settings.xml as basic authorization");
+                }
+                conn.addRequestProperty("Authorization", basicAuth);
+            }
+        }
+    }
+
+    /**
+     * Check if host name matches nonProxy settings
+     *
+     * @param url the URL to connect to
      * @return matching result. true: match nonProxy
      */
+    @SuppressWarnings("StringSplitter")
     private boolean matchNonProxy(final URL url) {
         final String host = url.getHost();
 
@@ -150,15 +205,15 @@ public final class URLConnectionFactory {
                     final String nonProxyHostPrefix = nonProxyHost.substring(0, pos);
                     final String nonProxyHostSuffix = nonProxyHost.substring(pos + 1);
                     // prefix*
-                    if (!StringUtils.isEmpty(nonProxyHostPrefix) && host.startsWith(nonProxyHostPrefix) && StringUtils.isEmpty(nonProxyHostSuffix)) {
+                    if (!StringUtils.isBlank(nonProxyHostPrefix) && host.startsWith(nonProxyHostPrefix) && StringUtils.isBlank(nonProxyHostSuffix)) {
                         return true;
                     }
                     // *suffix
-                    if (StringUtils.isEmpty(nonProxyHostPrefix) && !StringUtils.isEmpty(nonProxyHostSuffix) && host.endsWith(nonProxyHostSuffix)) {
+                    if (StringUtils.isBlank(nonProxyHostPrefix) && !StringUtils.isBlank(nonProxyHostSuffix) && host.endsWith(nonProxyHostSuffix)) {
                         return true;
                     }
                     // prefix*suffix
-                    if (!StringUtils.isEmpty(nonProxyHostPrefix) && host.startsWith(nonProxyHostPrefix) && !StringUtils.isEmpty(nonProxyHostSuffix)
+                    if (!StringUtils.isBlank(nonProxyHostPrefix) && host.startsWith(nonProxyHostPrefix) && !StringUtils.isBlank(nonProxyHostSuffix)
                             && host.endsWith(nonProxyHostSuffix)) {
                         return true;
                     }
@@ -179,13 +234,14 @@ public final class URLConnectionFactory {
      * @param url the URL to connect to
      * @param proxy whether to use the proxy (if configured)
      * @return a newly constructed HttpURLConnection
-     * @throws URLConnectionFailureException thrown if there is an exception
+     * @throws org.owasp.dependencycheck.utils.URLConnectionFailureException
+     * thrown if there is an exception
      */
     public HttpURLConnection createHttpURLConnection(URL url, boolean proxy) throws URLConnectionFailureException {
         if (proxy) {
             return createHttpURLConnection(url);
         }
-        HttpURLConnection conn = null;
+        final HttpURLConnection conn;
         try {
             conn = (HttpURLConnection) url.openConnection();
             final int timeout = settings.getInt(Settings.KEYS.CONNECTION_TIMEOUT, 10000);
@@ -195,6 +251,7 @@ public final class URLConnectionFactory {
             throw new URLConnectionFailureException("Error getting connection.", ioe);
         }
         configureTLS(url, conn);
+        addAuthenticationIfPresent(conn);
         return conn;
     }
 

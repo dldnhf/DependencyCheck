@@ -15,17 +15,20 @@
  */
 package org.owasp.dependencycheck.data.update;
 
+import java.time.*;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.TemporalAccessor;
 import java.util.Properties;
+
 import mockit.Injectable;
 import mockit.Mock;
 import mockit.MockUp;
 import mockit.Tested;
-import mockit.integration.junit4.JMockit;
-import org.joda.time.DateTime;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import org.owasp.dependencycheck.BaseTest;
 import org.owasp.dependencycheck.data.nvdcve.CveDB;
 import org.owasp.dependencycheck.data.nvdcve.DatabaseProperties;
@@ -33,10 +36,8 @@ import org.owasp.dependencycheck.data.update.exception.UpdateException;
 import org.owasp.dependencycheck.utils.DependencyVersion;
 
 /**
- *
  * @author Jeremy Long
  */
-@RunWith(JMockit.class)
 public class EngineVersionCheckTest extends BaseTest {
 
     @Injectable
@@ -71,8 +72,8 @@ public class EngineVersionCheckTest extends BaseTest {
         String updateToVersion = "1.2.6";
         String currentVersion = "1.2.6";
 
-        long lastChecked = dateToMilliseconds("2014-12-01");
-        long now = dateToMilliseconds("2014-12-01");
+        long lastChecked = dateToSeconds("2014-12-01");
+        long now = dateToSeconds("2014-12-01");
 
         EngineVersionCheck instance = new EngineVersionCheck(getSettings());
         boolean expResult = false;
@@ -82,8 +83,8 @@ public class EngineVersionCheckTest extends BaseTest {
 
         updateToVersion = "1.2.5";
         currentVersion = "1.2.5";
-        lastChecked = dateToMilliseconds("2014-10-01");
-        now = dateToMilliseconds("2014-12-01");
+        lastChecked = dateToSeconds("2014-10-01");
+        now = dateToSeconds("2014-12-01");
         expResult = true;
         instance.setUpdateToVersion(updateToVersion);
         result = instance.shouldUpdate(lastChecked, now, dbProperties, currentVersion);
@@ -92,8 +93,8 @@ public class EngineVersionCheckTest extends BaseTest {
 
         updateToVersion = "1.2.5";
         currentVersion = "1.2.5";
-        lastChecked = dateToMilliseconds("2014-12-01");
-        now = dateToMilliseconds("2014-12-03");
+        lastChecked = dateToSeconds("2014-12-01");
+        now = dateToSeconds("2014-12-03");
         expResult = false;
         instance.setUpdateToVersion(updateToVersion);
         result = instance.shouldUpdate(lastChecked, now, dbProperties, currentVersion);
@@ -101,8 +102,8 @@ public class EngineVersionCheckTest extends BaseTest {
 
         updateToVersion = "1.2.6";
         currentVersion = "1.2.5";
-        lastChecked = dateToMilliseconds("2014-12-01");
-        now = dateToMilliseconds("2014-12-03");
+        lastChecked = dateToSeconds("2014-12-01");
+        now = dateToSeconds("2014-12-03");
         expResult = true;
         instance.setUpdateToVersion(updateToVersion);
         result = instance.shouldUpdate(lastChecked, now, dbProperties, currentVersion);
@@ -110,8 +111,8 @@ public class EngineVersionCheckTest extends BaseTest {
 
         updateToVersion = "1.2.5";
         currentVersion = "1.2.6";
-        lastChecked = dateToMilliseconds("2014-12-01");
-        now = dateToMilliseconds("2014-12-08");
+        lastChecked = dateToSeconds("2014-12-01");
+        now = dateToSeconds("2014-12-08");
         expResult = false;
         instance.setUpdateToVersion(updateToVersion);
         result = instance.shouldUpdate(lastChecked, now, dbProperties, currentVersion);
@@ -119,8 +120,8 @@ public class EngineVersionCheckTest extends BaseTest {
 
         updateToVersion = "";
         currentVersion = "1.2.5";
-        lastChecked = dateToMilliseconds("2014-12-01");
-        now = dateToMilliseconds("2014-12-03");
+        lastChecked = dateToSeconds("2014-12-01");
+        now = dateToSeconds("2014-12-03");
         expResult = false;
         instance.setUpdateToVersion(updateToVersion);
         result = instance.shouldUpdate(lastChecked, now, dbProperties, currentVersion);
@@ -128,8 +129,8 @@ public class EngineVersionCheckTest extends BaseTest {
 
         updateToVersion = "";
         currentVersion = "1.2.5";
-        lastChecked = dateToMilliseconds("2014-12-01");
-        now = dateToMilliseconds("2015-12-08");
+        lastChecked = dateToSeconds("2014-12-01");
+        now = dateToSeconds("2015-12-08");
         expResult = true;
         instance.setUpdateToVersion(updateToVersion);
         result = instance.shouldUpdate(lastChecked, now, dbProperties, currentVersion);
@@ -152,18 +153,11 @@ public class EngineVersionCheckTest extends BaseTest {
      * Converts a date in the form of yyyy-MM-dd into the epoch milliseconds.
      *
      * @param date a date in the format of yyyy-MM-dd
-     * @return milliseconds
+     * @return seconds
      */
-    private long dateToMilliseconds(String date) {
-        //removed for compatibility with joda-time 1.6
-        //DateTimeFormatter dtf = DateTimeFormat.forPattern("yyyy-MM-dd");
-        //return DateTime.parse(date, dtf).toInstant().getMillis();
-        String[] dp = date.split("-");
-        int y = Integer.parseInt(dp[0]);
-        int m = Integer.parseInt(dp[1]);
-        int d = Integer.parseInt(dp[2]);
-        DateTime dt = new DateTime(y, m, d, 0, 0, 0, 0);
-        return dt.toInstant().getMillis();
+    private long dateToSeconds(String date) {
+        TemporalAccessor ta = DateTimeFormatter.ISO_LOCAL_DATE.parse(date);
+        return LocalDate.from(ta).atStartOfDay(ZoneId.systemDefault()).toEpochSecond();
     }
 
 }

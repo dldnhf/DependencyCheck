@@ -1,5 +1,5 @@
 /*
- * This file is part of dependency-check-core.
+ * This file is part of dependency-check-utils.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,15 @@
  */
 package org.owasp.dependencycheck.utils;
 
-import com.google.gson.Gson;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -32,15 +38,21 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.ProtectionDomain;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * A simple settings container that wraps the dependencycheck.properties file.
  *
  * @author Jeremy Long
+ * @version $Id: $Id
  */
 public final class Settings {
 
@@ -60,27 +72,37 @@ public final class Settings {
      * The properties.
      */
     private Properties props = null;
-
+    /**
+     * The collection of properties that should be masked when logged.
+     */
+    private List<Predicate<String>> maskedKeys;
     /**
      * A reference to the temporary directory; used in case it needs to be
      * deleted during cleanup.
      */
     private File tempDirectory = null;
 
+    /**
+     * Reference to a utility class used to convert objects to json.
+     */
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     //<editor-fold defaultstate="collapsed" desc="KEYS used to access settings">
     /**
      * The collection of keys used within the properties file.
      */
+    //suppress hard-coded password rule
+    @SuppressWarnings("squid:S2068")
     public static final class KEYS {
 
         /**
          * The key to obtain the application name.
          */
-        public static final String APPLICATION_NAME = "application.name";
+        public static final String APPLICATION_NAME = "odc.application.name";
         /**
          * The key to obtain the application version.
          */
-        public static final String APPLICATION_VERSION = "application.version";
+        public static final String APPLICATION_VERSION = "odc.application.version";
         /**
          * The key to obtain the URL to retrieve the current release version
          * from.
@@ -90,7 +112,7 @@ public final class Settings {
          * The properties key indicating whether or not the cached data sources
          * should be updated.
          */
-        public static final String AUTO_UPDATE = "autoupdate";
+        public static final String AUTO_UPDATE = "odc.autoupdate";
         /**
          * The database driver class name. If this is not in the properties file
          * the embedded database is used.
@@ -133,59 +155,60 @@ public final class Settings {
         public static final String DB_VERSION = "data.version";
         /**
          * The starts with filter used to exclude CVE entries from the database.
-         * By default this is set to 'cpe:/a:' which limits the CVEs imported to
-         * just those that are related to applications. If this were set to just
-         * 'cpe:' the OS, hardware, and application related CVEs would be
-         * imported.
+         * By default this is set to 'cpe:2.3:a:' which limits the CVEs imported
+         * to just those that are related to applications. If this were set to
+         * just 'cpe:2.3:' the OS, hardware, and application related CVEs would
+         * be imported.
          */
         public static final String CVE_CPE_STARTS_WITH_FILTER = "cve.cpe.startswith.filter";
         /**
-         * The properties key for the URL to retrieve the "meta" data from about
-         * the CVE entries.
-         *
-         * @deprecated this is not currently used
+         * The NVD API Endpoint.
          */
-        @Deprecated
-        public static final String CVE_META_URL = "cve.url.meta";
+        public static final String NVD_API_ENDPOINT = "nvd.api.endpoint";
         /**
-         * The properties key for the URL to retrieve the recently modified and
-         * added CVE entries (last 8 days) using the 2.0 schema.
+         * API Key for the NVD API.
          */
-        public static final String CVE_MODIFIED_20_URL = "cve.url-2.0.modified";
+        public static final String NVD_API_KEY = "nvd.api.key";
         /**
-         * The properties key for the URL to retrieve the recently modified and
-         * added CVE entries (last 8 days) using the 2.0 schema.
+         * The delay between requests for the NVD API.
          */
-        public static final String CVE_ORIGINAL_MODIFIED_20_URL = "cve.url-2.0.original";
+        public static final String NVD_API_DELAY = "nvd.api.delay";
         /**
-         * The properties key for the URL to retrieve the recently modified and
-         * added CVE entries (last 8 days) using the 1.2 schema.
+         * The maximum number of retry requests for a single call to the NVD
+         * API.
          */
-        public static final String CVE_MODIFIED_12_URL = "cve.url-1.2.modified";
+        public static final String NVD_API_MAX_RETRY_COUNT = "nvd.api.max.retry.count";
         /**
-         * The properties key for the URL to retrieve the recently modified and
-         * added CVE entries (last 8 days).
-         */
-        public static final String CVE_MODIFIED_VALID_FOR_DAYS = "cve.url.modified.validfordays";
-        /**
-         * The properties key to control the skipping of the check for CVE
+         * The properties key to control the skipping of the check for NVD
          * updates.
          */
-        public static final String CVE_CHECK_VALID_FOR_HOURS = "cve.check.validforhours";
+        public static final String NVD_API_VALID_FOR_HOURS = "nvd.api.check.validforhours";
         /**
-         * The properties key for the telling us how many cve.url.* URLs exists.
-         * This is used in combination with CVE_BASE_URL to be able to retrieve
-         * the URLs for all of the files that make up the NVD CVE listing.
+         * The properties key that indicates how often the NVD API data feed
+         * needs to be updated before a full refresh is evaluated.
          */
-        public static final String CVE_START_YEAR = "cve.startyear";
+        public static final String NVD_API_DATAFEED_VALID_FOR_DAYS = "nvd.api.datafeed.validfordays";
         /**
-         * The properties key for the CVE schema version 1.2.
+         * The URL for the NVD API Data Feed.
          */
-        public static final String CVE_SCHEMA_1_2 = "cve.url-1.2.base";
+        public static final String NVD_API_DATAFEED_URL = "nvd.api.datafeed.url";
         /**
-         * The properties key for the CVE schema version 2.0.
+         * The username to use when connecting to the NVD Data feed.
          */
-        public static final String CVE_SCHEMA_2_0 = "cve.url-2.0.base";
+        public static final String NVD_API_DATAFEED_USER = "nvd.api.datafeed.user";
+        /**
+         * The password to authenticate to the NVD Data feed.
+         */
+        public static final String NVD_API_DATAFEED_PASSWORD = "nvd.api.datafeed.password";
+        /**
+         * The starting year for the NVD CVE Data feed cache.
+         */
+        public static final String NVD_API_DATAFEED_START_YEAR = "nvd.api.datafeed.startyear";
+        //END NEW
+        /**
+         * The key to determine if the NVD CVE analyzer is enabled.
+         */
+        public static final String ANALYZER_NVD_CVE_ENABLED = "analyzer.nvdcve.enabled";
         /**
          * The properties key that indicates how often the CPE data needs to be
          * updated.
@@ -196,20 +219,21 @@ public final class Settings {
          */
         public static final String CPE_URL = "cpe.url";
         /**
+         * The properties key for the URL to retrieve the Known Exploited
+         * Vulnerabilities..
+         */
+        public static final String KEV_URL = "kev.url";
+        /**
+         * The properties key to control the skipping of the check for Known
+         * Exploited Vulnerabilities updates.
+         */
+        public static final String KEV_CHECK_VALID_FOR_HOURS = "kev.check.validforhours";
+        /**
          * Whether or not if using basic auth with a proxy the system setting
          * 'jdk.http.auth.tunneling.disabledSchemes' should be set to an empty
          * string.
          */
         public static final String PROXY_DISABLE_SCHEMAS = "proxy.disableSchemas";
-        /**
-         * The properties key for the proxy server.
-         *
-         * @deprecated use
-         * {@link org.owasp.dependencycheck.utils.Settings.KEYS#PROXY_SERVER}
-         * instead.
-         */
-        @Deprecated
-        public static final String PROXY_URL = "proxy.server";
         /**
          * The properties key for the proxy server.
          */
@@ -236,6 +260,10 @@ public final class Settings {
          */
         public static final String CONNECTION_TIMEOUT = "connection.timeout";
         /**
+         * The properties key for the connection read timeout.
+         */
+        public static final String CONNECTION_READ_TIMEOUT = "connection.read.timeout";
+        /**
          * The location of the temporary directory.
          */
         public static final String TEMP_DIRECTORY = "temp.directory";
@@ -252,13 +280,56 @@ public final class Settings {
          */
         public static final String SUPPRESSION_FILE = "suppression.file";
         /**
+         * The username used when connecting to the suppressionFiles.
+         */
+        public static final String SUPPRESSION_FILE_USER = "suppression.file.user";
+        /**
+         * The password used when connecting to the suppressionFiles.
+         */
+        public static final String SUPPRESSION_FILE_PASSWORD = "suppression.file.password";
+        /**
+         * The key for the whether the hosted suppressions file datasource is
+         * enabled.
+         */
+        public static final String HOSTED_SUPPRESSIONS_ENABLED = "hosted.suppressions.enabled";
+        /**
+         * The key for the hosted suppressions file URL.
+         */
+        public static final String HOSTED_SUPPRESSIONS_URL = "hosted.suppressions.url";
+
+        /**
+         * The properties key for defining whether the hosted suppressions file
+         * will be updated regardless of the autoupdate settings.
+         */
+        public static final String HOSTED_SUPPRESSIONS_FORCEUPDATE = "hosted.suppressions.forceupdate";
+
+        /**
+         * The properties key to control the skipping of the check for hosted
+         * suppressions file updates.
+         */
+        public static final String HOSTED_SUPPRESSIONS_VALID_FOR_HOURS = "hosted.suppressions.validforhours";
+
+        /**
          * The key for the hint file.
          */
         public static final String HINTS_FILE = "hints.file";
         /**
+         * The key for the property that controls what CVSS scores are
+         * considered failing test cases for the JUNIT repor.
+         */
+        public static final String JUNIT_FAIL_ON_CVSS = "junit.fail.on.cvss";
+
+        /**
          * The properties key for whether the Jar Analyzer is enabled.
          */
         public static final String ANALYZER_JAR_ENABLED = "analyzer.jar.enabled";
+
+        /**
+         * The properties key for whether the Known Exploited Vulnerability
+         * Analyzer is enabled.
+         */
+        public static final String ANALYZER_KNOWN_EXPLOITED_ENABLED = "analyzer.knownexploited.enabled";
+
         /**
          * The properties key for whether experimental analyzers are loaded.
          */
@@ -277,13 +348,36 @@ public final class Settings {
          */
         public static final String ANALYZER_NODE_PACKAGE_ENABLED = "analyzer.node.package.enabled";
         /**
+         * The properties key for configure whether the Node Package analyzer
+         * should skip devDependencies.
+         */
+        public static final String ANALYZER_NODE_PACKAGE_SKIPDEV = "analyzer.node.package.skipdev";
+        /**
          * The properties key for whether the Node Audit analyzer is enabled.
          */
         public static final String ANALYZER_NODE_AUDIT_ENABLED = "analyzer.node.audit.enabled";
         /**
+         * The properties key for whether the Yarn Audit analyzer is enabled.
+         */
+        public static final String ANALYZER_YARN_AUDIT_ENABLED = "analyzer.yarn.audit.enabled";
+        /**
+         * The properties key for whether the Pnpm Audit analyzer is enabled.
+         */
+        public static final String ANALYZER_PNPM_AUDIT_ENABLED = "analyzer.pnpm.audit.enabled";
+        /**
          * The properties key for supplying the URL to the Node Audit API.
          */
         public static final String ANALYZER_NODE_AUDIT_URL = "analyzer.node.audit.url";
+        /**
+         * The properties key for configure whether the Node Audit analyzer
+         * should skip devDependencies.
+         */
+        public static final String ANALYZER_NODE_AUDIT_SKIPDEV = "analyzer.node.audit.skipdev";
+        /**
+         * The properties key for whether node audit analyzer results will be
+         * cached.
+         */
+        public static final String ANALYZER_NODE_AUDIT_USE_CACHE = "analyzer.node.audit.use.cache";
         /**
          * The properties key for whether the RetireJS analyzer is enabled.
          */
@@ -298,21 +392,38 @@ public final class Settings {
          * out non-vulnerable dependencies.
          */
         public static final String ANALYZER_RETIREJS_FILTER_NON_VULNERABLE = "analyzer.retirejs.filternonvulnerable";
-
         /**
          * The properties key for defining the URL to the RetireJS repository.
          */
         public static final String ANALYZER_RETIREJS_REPO_JS_URL = "analyzer.retirejs.repo.js.url";
+        /**
+         * The properties key for the Nexus search credentials username.
+         */
+        public static final String ANALYZER_RETIREJS_REPO_JS_USER = "analyzer.retirejs.repo.js.username";
+        /**
+         * The properties key for the Nexus search credentials password.
+         */
+        public static final String ANALYZER_RETIREJS_REPO_JS_PASSWORD = "analyzer.retirejs.repo.js.password";
+        /**
+         * The properties key for defining whether the RetireJS repository will
+         * be updated regardless of the autoupdate settings.
+         */
+        public static final String ANALYZER_RETIREJS_FORCEUPDATE = "analyzer.retirejs.forceupdate";
         /**
          * The properties key to control the skipping of the check for CVE
          * updates.
          */
         public static final String ANALYZER_RETIREJS_REPO_VALID_FOR_HOURS = "analyzer.retirejs.repo.validforhours";
         /**
-         * The properties key for whether the composer lock file analyzer is
+         * The properties key for whether the PHP composer lock file analyzer is
          * enabled.
          */
         public static final String ANALYZER_COMPOSER_LOCK_ENABLED = "analyzer.composer.lock.enabled";
+        /**
+         * The properties key for whether the Perl CPAN file file analyzer is
+         * enabled.
+         */
+        public static final String ANALYZER_CPANFILE_ENABLED = "analyzer.cpanfile.enabled";
         /**
          * The properties key for whether the Python Distribution analyzer is
          * enabled.
@@ -324,6 +435,35 @@ public final class Settings {
          */
         public static final String ANALYZER_PYTHON_PACKAGE_ENABLED = "analyzer.python.package.enabled";
         /**
+         * The properties key for whether the Elixir mix audit analyzer is
+         * enabled.
+         */
+        public static final String ANALYZER_MIX_AUDIT_ENABLED = "analyzer.mix.audit.enabled";
+        /**
+         * The path to mix_audit, if available.
+         */
+        public static final String ANALYZER_MIX_AUDIT_PATH = "analyzer.mix.audit.path";
+        /**
+         * The properties key for whether the Golang Mod analyzer is enabled.
+         */
+        public static final String ANALYZER_GOLANG_MOD_ENABLED = "analyzer.golang.mod.enabled";
+        /**
+         * The path to go, if available.
+         */
+        public static final String ANALYZER_GOLANG_PATH = "analyzer.golang.path";
+        /**
+         * The path to go, if available.
+         */
+        public static final String ANALYZER_YARN_PATH = "analyzer.yarn.path";
+        /**
+         * The path to pnpm, if available.
+         */
+        public static final String ANALYZER_PNPM_PATH = "analyzer.pnpm.path";
+        /**
+         * The properties key for whether the Golang Dep analyzer is enabled.
+         */
+        public static final String ANALYZER_GOLANG_DEP_ENABLED = "analyzer.golang.dep.enabled";
+        /**
          * The properties key for whether the Ruby Gemspec Analyzer is enabled.
          */
         public static final String ANALYZER_RUBY_GEMSPEC_ENABLED = "analyzer.ruby.gemspec.enabled";
@@ -331,6 +471,23 @@ public final class Settings {
          * The properties key for whether the Autoconf analyzer is enabled.
          */
         public static final String ANALYZER_AUTOCONF_ENABLED = "analyzer.autoconf.enabled";
+        /**
+         * The properties key for whether the maven_install.json analyzer is
+         * enabled.
+         */
+        public static final String ANALYZER_MAVEN_INSTALL_ENABLED = "analyzer.maveninstall.enabled";
+        /**
+         * The properties key for whether the pip analyzer is enabled.
+         */
+        public static final String ANALYZER_PIP_ENABLED = "analyzer.pip.enabled";
+        /**
+         * The properties key for whether the pipfile analyzer is enabled.
+         */
+        public static final String ANALYZER_PIPFILE_ENABLED = "analyzer.pipfile.enabled";
+        /**
+         * The properties key for whether the Poetry analyzer is enabled.
+         */
+        public static final String ANALYZER_POETRY_ENABLED = "analyzer.poetry.enabled";
         /**
          * The properties key for whether the CMake analyzer is enabled.
          */
@@ -357,6 +514,10 @@ public final class Settings {
          * analyzer is enabled.
          */
         public static final String ANALYZER_NUGETCONF_ENABLED = "analyzer.nugetconf.enabled";
+        /**
+         * The properties key for whether the Libman analyzer is enabled.
+         */
+        public static final String ANALYZER_LIBMAN_ENABLED = "analyzer.libman.enabled";
         /**
          * The properties key for whether the .NET MSBuild Project analyzer is
          * enabled.
@@ -421,6 +582,14 @@ public final class Settings {
          */
         public static final String ANALYZER_CENTRAL_ENABLED = "analyzer.central.enabled";
         /**
+         * Key for the path to the local Maven repository.
+         */
+        public static final String MAVEN_LOCAL_REPO = "odc.maven.local.repo";
+        /**
+         * Key for the URL to obtain content from Maven Central.
+         */
+        public static final String CENTRAL_CONTENT_URL = "central.content.url";
+        /**
          * The properties key for whether the Central analyzer should use
          * parallel processing.
          */
@@ -439,10 +608,19 @@ public final class Settings {
          */
         public static final String ANALYZER_COCOAPODS_ENABLED = "analyzer.cocoapods.enabled";
         /**
+         * The properties key for whether the carthage analyzer is enabled.
+         */
+        public static final String ANALYZER_CARTHAGE_ENABLED = "analyzer.carthage.enabled";
+        /**
          * The properties key for whether the SWIFT package manager analyzer is
          * enabled.
          */
         public static final String ANALYZER_SWIFT_PACKAGE_MANAGER_ENABLED = "analyzer.swift.package.manager.enabled";
+        /**
+         * The properties key for whether the SWIFT package resolved analyzer is
+         * enabled.
+         */
+        public static final String ANALYZER_SWIFT_PACKAGE_RESOLVED_ENABLED = "analyzer.swift.package.resolved.enabled";
         /**
          * The properties key for the Central search URL.
          */
@@ -452,13 +630,21 @@ public final class Settings {
          */
         public static final String ANALYZER_CENTRAL_QUERY = "analyzer.central.query";
         /**
-         * The path to mono, if available.
+         * The properties key for whether Central search results will be cached.
          */
-        public static final String ANALYZER_ASSEMBLY_MONO_PATH = "analyzer.assembly.mono.path";
+        public static final String ANALYZER_CENTRAL_USE_CACHE = "analyzer.central.use.cache";
+        /**
+         * The path to dotnet core, if available.
+         */
+        public static final String ANALYZER_ASSEMBLY_DOTNET_PATH = "analyzer.assembly.dotnet.path";
         /**
          * The path to bundle-audit, if available.
          */
         public static final String ANALYZER_BUNDLE_AUDIT_PATH = "analyzer.bundle.audit.path";
+        /**
+         * The path to bundle-audit, if available.
+         */
+        public static final String ANALYZER_BUNDLE_AUDIT_WORKING_DIRECTORY = "analyzer.bundle.audit.working.directory";
         /**
          * The additional configured zip file extensions, if available.
          */
@@ -496,6 +682,10 @@ public final class Settings {
          */
         public static final String ANALYZER_CPE_ENABLED = "analyzer.cpe.enabled";
         /**
+         * The key to determine if the NPM CPE analyzer is enabled.
+         */
+        public static final String ANALYZER_NPM_CPE_ENABLED = "analyzer.npm.cpe.enabled";
+        /**
          * The key to determine if the CPE Suppression analyzer is enabled.
          */
         public static final String ANALYZER_CPE_SUPPRESSION_ENABLED = "analyzer.cpesuppression.enabled";
@@ -516,6 +706,10 @@ public final class Settings {
          */
         public static final String ANALYZER_FILE_NAME_ENABLED = "analyzer.filename.enabled";
         /**
+         * The key to determine if the File Version analyzer is enabled.
+         */
+        public static final String ANALYZER_PE_ENABLED = "analyzer.pe.enabled";
+        /**
          * The key to determine if the Hint analyzer is enabled.
          */
         public static final String ANALYZER_HINT_ENABLED = "analyzer.hint.enabled";
@@ -523,10 +717,6 @@ public final class Settings {
          * The key to determine if the Version Filter analyzer is enabled.
          */
         public static final String ANALYZER_VERSION_FILTER_ENABLED = "analyzer.versionfilter.enabled";
-        /**
-         * The key to determine if the NVD CVE analyzer is enabled.
-         */
-        public static final String ANALYZER_NVD_CVE_ENABLED = "analyzer.nvdcve.enabled";
         /**
          * The key to determine if the Vulnerability Suppression analyzer is
          * enabled.
@@ -546,11 +736,6 @@ public final class Settings {
          */
         public static final String ECOSYSTEM_SKIP_CPEANALYZER = "ecosystem.skip.cpeanalyzer";
         /**
-         * The key to determine minimum score for Lucene search matches.
-         */
-        public static final String LUCENE_MIN_SCORE_FILTER = "dependency.check.lucene.min.score";
-        /**
-         *
          * Adds capabilities to batch insert. Tested on PostgreSQL and H2.
          */
         public static final String ENABLE_BATCH_UPDATES = "database.batchinsert.enabled";
@@ -559,10 +744,76 @@ public final class Settings {
          */
         public static final String MAX_BATCH_SIZE = "database.batchinsert.maxsize";
         /**
-         * The key that specifies the class name of the H2 database shutdown
+         * The key that specifies the class name of the Write Lock shutdown
          * hook.
          */
-        public static final String H2DB_SHUTDOWN_HOOK = "data.h2.shutdownhook";
+        public static final String WRITELOCK_SHUTDOWN_HOOK = "data.writelock.shutdownhook";
+        /**
+         * The properties key for whether the Sonatype OSS Index analyzer is
+         * enabled.
+         */
+        public static final String ANALYZER_OSSINDEX_ENABLED = "analyzer.ossindex.enabled";
+        /**
+         * The properties key for whether the Sonatype OSS Index should use a
+         * local cache.
+         */
+        public static final String ANALYZER_OSSINDEX_USE_CACHE = "analyzer.ossindex.use.cache";
+        /**
+         * The properties key for the Sonatype OSS Index URL.
+         */
+        public static final String ANALYZER_OSSINDEX_URL = "analyzer.ossindex.url";
+        /**
+         * The properties key for the Sonatype OSS Index user.
+         */
+        public static final String ANALYZER_OSSINDEX_USER = "analyzer.ossindex.user";
+        /**
+         * The properties key for the Sonatype OSS Index password.
+         */
+        public static final String ANALYZER_OSSINDEX_PASSWORD = "analyzer.ossindex.password";
+        /**
+         * The properties key for the Sonatype OSS batch-size.
+         */
+        public static final String ANALYZER_OSSINDEX_BATCH_SIZE = "analyzer.ossindex.batch.size";
+        /**
+         * The properties key for the Sonatype OSS Request Delay. Amount of time
+         * in seconds to wait before executing a request against the Sonatype
+         * OSS Rest API
+         */
+        public static final String ANALYZER_OSSINDEX_REQUEST_DELAY = "analyzer.ossindex.request.delay";
+        /**
+         * The properties key for only warning about Sonatype OSS Index remote
+         * errors instead of failing the request.
+         */
+        public static final String ANALYZER_OSSINDEX_WARN_ONLY_ON_REMOTE_ERRORS = "analyzer.ossindex.remote-error.warn-only";
+        /**
+         * The properties key setting whether or not the JSON and XML reports
+         * will be pretty printed.
+         */
+
+        /**
+         * The properties key for whether the Dart analyzer is enabled.
+         */
+        public static final String ANALYZER_DART_ENABLED = "analyzer.dart.enabled";
+
+        /**
+         * The properties key for whether to pretty print the XML/JSON reports.
+         */
+        public static final String PRETTY_PRINT = "odc.reports.pretty.print";
+        /**
+         * The properties key setting which other keys should be considered
+         * sensitive and subsequently masked when logged.
+         */
+        public static final String MASKED_PROPERTIES = "odc.settings.mask";
+        /**
+         * The properties key for the default max query size for Lucene query
+         * results.
+         */
+        public static final String MAX_QUERY_SIZE_DEFAULT = "odc.ecosystem.maxquerylimit.default";
+        /**
+         * The properties key prefix for the default max query size for Lucene
+         * query results; append the ecosystem to obtain the default query size.
+         */
+        public static final String MAX_QUERY_SIZE_PREFIX = "odc.ecosystem.maxquerylimit.";
 
         /**
          * private constructor because this is a "utility" class containing
@@ -582,11 +833,22 @@ public final class Settings {
     }
 
     /**
+     * Initialize the settings object using the given properties.
+     *
+     * @param properties the properties to be used with this Settings instance
+     * @since 4.0.3
+     */
+    public Settings(final Properties properties) {
+        props = properties;
+        logProperties("Properties loaded", props);
+    }
+
+    /**
      * Initialize the settings object using the given properties file.
      *
      * @param propertiesFilePath the path to the base properties file to load
      */
-    public Settings(String propertiesFilePath) {
+    public Settings(@NotNull final String propertiesFilePath) {
         initialize(propertiesFilePath);
     }
 
@@ -595,7 +857,7 @@ public final class Settings {
      *
      * @param propertiesFilePath the path to the settings property file
      */
-    private void initialize(String propertiesFilePath) {
+    private void initialize(@NotNull final String propertiesFilePath) {
         props = new Properties();
         try (InputStream in = FileUtils.getResourceAsStream(propertiesFilePath)) {
             props.load(in);
@@ -611,7 +873,6 @@ public final class Settings {
 
     /**
      * Cleans up resources to prevent memory leaks.
-     *
      */
     public void cleanup() {
         cleanup(true);
@@ -632,33 +893,76 @@ public final class Settings {
     }
 
     /**
+     * Check if a given key is considered to have a value with sensitive data.
+     *
+     * @param key the key to determine if the property should be masked
+     * @return <code>true</code> if the key is for a sensitive property value;
+     * otherwise <code>false</code>
+     */
+    private boolean isKeyMasked(@NotNull String key) {
+        if (maskedKeys == null || maskedKeys.isEmpty()) {
+            initMaskedKeys();
+        }
+        return maskedKeys.stream().anyMatch(maskExp -> maskExp.test(key));
+    }
+
+    /**
+     * Obtains the printable/loggable value for a given key/value pair. This
+     * will mask some values so as to not leak sensitive information.
+     *
+     * @param key the property key
+     * @param value the property value
+     * @return the printable value
+     */
+    String getPrintableValue(@NotNull String key, String value) {
+        String printableValue = null;
+        if (value != null) {
+            printableValue = isKeyMasked(key) ? "********" : value;
+        }
+        return printableValue;
+    }
+
+    /**
+     * Initializes the masked keys collection. This is done outside of the
+     * {@link #initialize(java.lang.String)} method because a caller may use the
+     * {@link #mergeProperties(java.io.File)} to add additional properties after
+     * the call to initialize.
+     */
+    void initMaskedKeys() {
+        final String[] masked = getArray(Settings.KEYS.MASKED_PROPERTIES);
+        if (masked == null) {
+            maskedKeys = new ArrayList<>();
+        } else {
+            maskedKeys = Arrays.stream(masked)
+                    .map(v -> Pattern.compile(v).asPredicate())
+                    .collect(Collectors.toList());
+        }
+    }
+
+    /**
      * Logs the properties. This will not log any properties that contain
      * 'password' in the key.
      *
      * @param header the header to print with the log message
      * @param properties the properties to log
      */
-    private void logProperties(String header, Properties properties) {
+    private void logProperties(@NotNull final String header, @NotNull final Properties properties) {
         if (LOGGER.isDebugEnabled()) {
+            initMaskedKeys();
             final StringWriter sw = new StringWriter();
             try (PrintWriter pw = new PrintWriter(sw)) {
                 pw.format("%s:%n%n", header);
                 final Enumeration<?> e = properties.propertyNames();
                 while (e.hasMoreElements()) {
                     final String key = (String) e.nextElement();
-                    if (key.contains("password")) {
-                        pw.format("%s='*****'%n", key);
-                    } else {
-                        final String value = properties.getProperty(key);
-                        if (value != null) {
-                            pw.format("%s='%s'%n", key, value);
-                        }
+                    final String value = getPrintableValue(key, properties.getProperty(key));
+                    if (value != null) {
+                        pw.format("%s='%s'%n", key, value);
                     }
                 }
                 pw.flush();
                 LOGGER.debug(sw.toString());
             }
-
         }
     }
 
@@ -668,9 +972,9 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setString(String key, String value) {
+    public void setString(@NotNull final String key, @NotNull final String value) {
         props.setProperty(key, value);
-        LOGGER.debug("Setting: {}='{}'", key, value);
+        LOGGER.debug("Setting: {}='{}'", key, getPrintableValue(key, value));
     }
 
     /**
@@ -679,7 +983,7 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setStringIfNotNull(String key, String value) {
+    public void setStringIfNotNull(@NotNull final String key, @Nullable final String value) {
         if (null != value) {
             setString(key, value);
         }
@@ -691,7 +995,7 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setStringIfNotEmpty(String key, String value) {
+    public void setStringIfNotEmpty(@NotNull final String key, @Nullable final String value) {
         if (null != value && !value.isEmpty()) {
             setString(key, value);
         }
@@ -703,9 +1007,13 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setArrayIfNotEmpty(String key, String[] value) {
+    public void setArrayIfNotEmpty(@NotNull final String key, @Nullable final String[] value) {
         if (null != value && value.length > 0) {
-            setString(key, new Gson().toJson(value));
+            try {
+                setString(key, objectMapper.writeValueAsString(value));
+            } catch (JsonProcessingException e) {
+                throw new IllegalArgumentException();
+            }
         }
     }
 
@@ -715,9 +1023,13 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setArrayIfNotEmpty(String key, List<String> value) {
+    public void setArrayIfNotEmpty(@NotNull final String key, @Nullable final List<String> value) {
         if (null != value && !value.isEmpty()) {
-            setString(key, new Gson().toJson(value));
+            try {
+                setString(key, objectMapper.writeValueAsString(value));
+            } catch (JsonProcessingException e) {
+                throw new IllegalArgumentException();
+            }
         }
     }
 
@@ -727,7 +1039,7 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setBoolean(String key, boolean value) {
+    public void setBoolean(@NotNull final String key, boolean value) {
         setString(key, Boolean.toString(value));
     }
 
@@ -737,10 +1049,20 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setBooleanIfNotNull(String key, Boolean value) {
+    public void setBooleanIfNotNull(@NotNull final String key, @Nullable final Boolean value) {
         if (null != value) {
             setBoolean(key, value);
         }
+    }
+
+    /**
+     * Sets a float property value.
+     *
+     * @param key the key for the property
+     * @param value the value for the property
+     */
+    public void setFloat(@NotNull final String key, final float value) {
+        setString(key, Float.toString(value));
     }
 
     /**
@@ -749,7 +1071,7 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setInt(String key, int value) {
+    public void setInt(@NotNull final String key, final int value) {
         props.setProperty(key, String.valueOf(value));
         LOGGER.debug("Setting: {}='{}'", key, value);
     }
@@ -760,7 +1082,7 @@ public final class Settings {
      * @param key the key for the property
      * @param value the value for the property
      */
-    public void setIntIfNotNull(String key, Integer value) {
+    public void setIntIfNotNull(@NotNull final String key, @Nullable final Integer value) {
         if (null != value) {
             setInt(key, value);
         }
@@ -773,12 +1095,13 @@ public final class Settings {
      * before properties loaded from files.
      *
      * @param filePath the path to the properties file to merge.
-     * @throws FileNotFoundException is thrown when the filePath points to a
-     * non-existent file
-     * @throws IOException is thrown when there is an exception loading/merging
-     * the properties
+     * @throws java.io.FileNotFoundException is thrown when the filePath points
+     * to a non-existent file
+     * @throws java.io.IOException is thrown when there is an exception
+     * loading/merging the properties
      */
-    public void mergeProperties(File filePath) throws FileNotFoundException, IOException {
+    @SuppressFBWarnings(justification = "try with resource will clenaup the resources", value = {"OBL_UNSATISFIED_OBLIGATION"})
+    public void mergeProperties(@NotNull final File filePath) throws FileNotFoundException, IOException {
         try (FileInputStream fis = new FileInputStream(filePath)) {
             mergeProperties(fis);
         }
@@ -791,12 +1114,13 @@ public final class Settings {
      * properties loaded from files.
      *
      * @param filePath the path to the properties file to merge.
-     * @throws FileNotFoundException is thrown when the filePath points to a
-     * non-existent file
-     * @throws IOException is thrown when there is an exception loading/merging
-     * the properties
+     * @throws java.io.FileNotFoundException is thrown when the filePath points
+     * to a non-existent file
+     * @throws java.io.IOException is thrown when there is an exception
+     * loading/merging the properties
      */
-    public void mergeProperties(String filePath) throws FileNotFoundException, IOException {
+    @SuppressFBWarnings(justification = "try with resource will clenaup the resources", value = {"OBL_UNSATISFIED_OBLIGATION"})
+    public void mergeProperties(@NotNull final String filePath) throws FileNotFoundException, IOException {
         try (FileInputStream fis = new FileInputStream(filePath)) {
             mergeProperties(fis);
         }
@@ -809,10 +1133,10 @@ public final class Settings {
      * before properties loaded from files.
      *
      * @param stream an Input Stream pointing at a properties file to merge
-     * @throws IOException is thrown when there is an exception loading/merging
-     * the properties
+     * @throws java.io.IOException is thrown when there is an exception
+     * loading/merging the properties
      */
-    public void mergeProperties(InputStream stream) throws IOException {
+    public void mergeProperties(@NotNull final InputStream stream) throws IOException {
         props.load(stream);
         logProperties("Properties updated via merge", props);
     }
@@ -826,7 +1150,8 @@ public final class Settings {
      * @param key the key to lookup within the properties file
      * @return the property from the properties file converted to a File object
      */
-    public File getFile(String key) {
+    @Nullable
+    public File getFile(@NotNull final String key) {
         final String file = getString(key);
         if (file == null) {
             return null;
@@ -839,7 +1164,7 @@ public final class Settings {
      * was specified as a system property or passed in via the -Dprop=value
      * argument - this method will return the value from the system properties
      * before the values in the contained configuration file.
-     *
+     * <p>
      * This method will check the configured base directory and will use this as
      * the base of the file path. Additionally, if the base directory begins
      * with a leading "[JAR]\" sequence with the path to the folder containing
@@ -848,7 +1173,7 @@ public final class Settings {
      * @param key the key to lookup within the properties file
      * @return the property from the properties file converted to a File object
      */
-    protected File getDataFile(String key) {
+    File getDataFile(@NotNull final String key) {
         final String file = getString(key);
         LOGGER.debug("Settings.getDataFile() - file: '{}'", file);
         if (file == null) {
@@ -859,7 +1184,7 @@ public final class Settings {
             final File jarPath = getJarPath();
             LOGGER.debug("Settings.getDataFile() - jar file: '{}'", jarPath.toString());
             final File retVal = new File(jarPath, file.substring(6));
-            LOGGER.debug("Settings.getDataFile() - returning: '{}'", retVal.toString());
+            LOGGER.debug("Settings.getDataFile() - returning: '{}'", retVal);
             return retVal;
         }
         return new File(file);
@@ -902,7 +1227,7 @@ public final class Settings {
      * @param defaultValue the default value for the requested property
      * @return the property from the properties file
      */
-    public String getString(String key, String defaultValue) {
+    public String getString(@NotNull final String key, @Nullable final String defaultValue) {
         return System.getProperty(key, props.getProperty(key, defaultValue));
     }
 
@@ -910,8 +1235,7 @@ public final class Settings {
      * Returns the temporary directory.
      *
      * @return the temporary directory
-     * @throws java.io.IOException thrown if the temporary directory does not
-     * exist and cannot be created
+     * @throws java.io.IOException if any.
      */
     public synchronized File getTempDirectory() throws IOException {
         if (tempDirectory == null) {
@@ -930,23 +1254,28 @@ public final class Settings {
      * @param key the key to lookup within the properties file
      * @return the property from the properties file
      */
-    public String getString(String key) {
+    public String getString(@NotNull final String key) {
         return System.getProperty(key, props.getProperty(key));
     }
 
     /**
      * Returns a list with the given key.
-     *
+     * <p>
      * If the property is not set then {@code null} will be returned.
      *
-     * @param key the key to get from this {@link Settings}.
+     * @param key the key to get from this
+     * {@link org.owasp.dependencycheck.utils.Settings}.
      * @return the list or {@code null} if the key wasn't present.
      */
-    public String[] getArray(final String key) {
+    public String[] getArray(@NotNull final String key) {
         final String string = getString(key);
         if (string != null) {
             if (string.charAt(0) == '{' || string.charAt(0) == '[') {
-                return new Gson().fromJson(string, String[].class);
+                try {
+                    return objectMapper.readValue(string, String[].class);
+                } catch (JsonProcessingException e) {
+                    throw new IllegalStateException("Unable to read value '" + string + "' as an array");
+                }
             } else {
                 return string.split(ARRAY_SEP);
             }
@@ -960,7 +1289,7 @@ public final class Settings {
      *
      * @param key the property key to remove
      */
-    public void removeProperty(String key) {
+    public void removeProperty(@NotNull final String key) {
         props.remove(key);
     }
 
@@ -972,10 +1301,10 @@ public final class Settings {
      *
      * @param key the key to lookup within the properties file
      * @return the property from the properties file
-     * @throws InvalidSettingException is thrown if there is an error retrieving
-     * the setting
+     * @throws org.owasp.dependencycheck.utils.InvalidSettingException is thrown
+     * if there is an error retrieving the setting
      */
-    public int getInt(String key) throws InvalidSettingException {
+    public int getInt(@NotNull final String key) throws InvalidSettingException {
         try {
             return Integer.parseInt(getString(key));
         } catch (NumberFormatException ex) {
@@ -994,13 +1323,14 @@ public final class Settings {
      * @return the property from the properties file or the defaultValue if the
      * property does not exist or cannot be converted to an integer
      */
-    public int getInt(String key, int defaultValue) {
+    public int getInt(@NotNull final String key, int defaultValue) {
         int value;
         try {
             value = Integer.parseInt(getString(key));
         } catch (NumberFormatException ex) {
             if (!getString(key, "").isEmpty()) {
-                LOGGER.debug("Could not convert property '{}={}' to an int; using {} instead.", key, getString(key), defaultValue);
+                LOGGER.debug("Could not convert property '{}={}' to an int; using {} instead.",
+                        key, getPrintableValue(key, getString(key)), defaultValue);
             }
             value = defaultValue;
         }
@@ -1015,10 +1345,10 @@ public final class Settings {
      *
      * @param key the key to lookup within the properties file
      * @return the property from the properties file
-     * @throws InvalidSettingException is thrown if there is an error retrieving
-     * the setting
+     * @throws org.owasp.dependencycheck.utils.InvalidSettingException is thrown
+     * if there is an error retrieving the setting
      */
-    public long getLong(String key) throws InvalidSettingException {
+    public long getLong(@NotNull final String key) throws InvalidSettingException {
         try {
             return Long.parseLong(getString(key));
         } catch (NumberFormatException ex) {
@@ -1035,10 +1365,10 @@ public final class Settings {
      *
      * @param key the key to lookup within the properties file
      * @return the property from the properties file
-     * @throws InvalidSettingException is thrown if there is an error retrieving
-     * the setting
+     * @throws org.owasp.dependencycheck.utils.InvalidSettingException is thrown
+     * if there is an error retrieving the setting
      */
-    public boolean getBoolean(String key) throws InvalidSettingException {
+    public boolean getBoolean(@NotNull final String key) throws InvalidSettingException {
         return Boolean.parseBoolean(getString(key));
     }
 
@@ -1053,10 +1383,8 @@ public final class Settings {
      * @param defaultValue the default value to return if the setting does not
      * exist
      * @return the property from the properties file
-     * @throws InvalidSettingException is thrown if there is an error retrieving
-     * the setting
      */
-    public boolean getBoolean(String key, boolean defaultValue) throws InvalidSettingException {
+    public boolean getBoolean(@NotNull final String key, boolean defaultValue) {
         return Boolean.parseBoolean(getString(key, Boolean.toString(defaultValue)));
     }
 
@@ -1072,12 +1400,12 @@ public final class Settings {
      * exist
      * @return the property from the properties file
      */
-    public float getFloat(String key, float defaultValue) {
+    public float getFloat(@NotNull final String key, float defaultValue) {
         float retValue = defaultValue;
         try {
             retValue = Float.parseFloat(getString(key));
-        } catch (Throwable ignore) {
-            LOGGER.trace("ignore", ignore);
+        } catch (Throwable ex) {
+            LOGGER.trace("ignore", ex);
         }
         return retValue;
     }
@@ -1114,7 +1442,7 @@ public final class Settings {
                         dbFileNameKey);
                 throw new InvalidSettingException(msg);
             }
-            if (connStr.startsWith("jdbc:h2:file:") && fileName.endsWith(".h2.db")) {
+            if (connStr.startsWith("jdbc:h2:file:") && fileName.endsWith(".mv.db")) {
                 fileName = fileName.substring(0, fileName.length() - 6);
             }
             // yes, for H2 this path won't actually exists - but this is sufficient to get the value needed
@@ -1131,7 +1459,8 @@ public final class Settings {
      * content.
      *
      * @return the data directory to store data files
-     * @throws IOException is thrown if an IOException occurs of course...
+     * @throws java.io.IOException is thrown if an java.io.IOException occurs of
+     * course...
      */
     public File getDataDirectory() throws IOException {
         final File path = getDataFile(Settings.KEYS.DATA_DIRECTORY);
@@ -1147,7 +1476,8 @@ public final class Settings {
      * temp directory this method will return the temp directory.
      *
      * @return the data directory to store data files
-     * @throws IOException is thrown if an IOException occurs of course...
+     * @throws java.io.IOException is thrown if an java.io.IOException occurs of
+     * course...
      */
     public File getH2DataDirectory() throws IOException {
         final String h2Test = getString(Settings.KEYS.H2_DATA_DIRECTORY);
@@ -1170,12 +1500,11 @@ public final class Settings {
      * @param prefix the prefix for the file name to generate
      * @param extension the extension of the generated file name
      * @return a temporary File
-     * @throws java.io.IOException thrown if the temporary folder could not be
-     * created
+     * @throws java.io.IOException if any.
      */
-    public File getTempFile(String prefix, String extension) throws IOException {
+    public File getTempFile(@NotNull final String prefix, @NotNull final String extension) throws IOException {
         final File dir = getTempDirectory();
-        final String tempFileName = String.format("%s%s.%s", prefix, UUID.randomUUID().toString(), extension);
+        final String tempFileName = String.format("%s%s.%s", prefix, UUID.randomUUID(), extension);
         final File tempFile = new File(dir, tempFileName);
         if (tempFile.exists()) {
             return getTempFile(prefix, extension);

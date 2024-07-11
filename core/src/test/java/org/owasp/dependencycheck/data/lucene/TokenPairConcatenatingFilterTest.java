@@ -25,7 +25,8 @@ import org.apache.lucene.analysis.MockTokenizer;
 import org.apache.lucene.analysis.Tokenizer;
 import org.apache.lucene.analysis.core.KeywordTokenizer;
 import static org.junit.Assert.fail;
-
+import org.junit.Before;
+import org.junit.Test;
 
 /**
  *
@@ -33,18 +34,21 @@ import static org.junit.Assert.fail;
  */
 public class TokenPairConcatenatingFilterTest extends BaseTokenStreamTestCase {
 
-    private final Analyzer analyzer;
-
-    public TokenPairConcatenatingFilterTest() {
-        analyzer = new Analyzer() {
-            @Override
-            protected Analyzer.TokenStreamComponents createComponents(String fieldName) {
-                Tokenizer source = new MockTokenizer(MockTokenizer.WHITESPACE, false);
-                return new Analyzer.TokenStreamComponents(source, new TokenPairConcatenatingFilter(source));
-            }
-        };
-    }
-
+//    private Analyzer analyzer;
+//
+//    @Before
+//    @Override
+//    public void setUp() throws Exception {
+//        super.setUp();
+//        analyzer = new Analyzer() {
+//            @Override
+//            protected Analyzer.TokenStreamComponents createComponents(String fieldName) {
+//                Tokenizer source = new MockTokenizer(MockTokenizer.WHITESPACE, false);
+//                return new Analyzer.TokenStreamComponents(source, new TokenPairConcatenatingFilter(source));
+//            }
+//        };
+//    }
+//
 //    /**
 //     * Test of incrementToken method, of class TokenPairConcatenatingFilter.
 //     */
@@ -58,7 +62,6 @@ public class TokenPairConcatenatingFilterTest extends BaseTokenStreamTestCase {
 //        expected[4] = "green";
 //        assertAnalyzesTo(analyzer, "red blue green", expected);
 //    }
-
 //    /**
 //     * copied from
 //     * http://svn.apache.org/repos/asf/lucene/dev/trunk/lucene/analysis/common/src/test/org/apache/lucene/analysis/en/TestEnglishMinimalStemFilter.java
@@ -77,6 +80,7 @@ public class TokenPairConcatenatingFilterTest extends BaseTokenStreamTestCase {
      *
      * @throws IOException
      */
+    @Test
     public void testEmptyTerm() {
         Analyzer a = new Analyzer() {
             @Override

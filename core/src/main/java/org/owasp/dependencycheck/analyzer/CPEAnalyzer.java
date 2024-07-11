@@ -26,41 +26,60 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
-import java.util.StringTokenizer;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import javax.annotation.concurrent.ThreadSafe;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.builder.CompareToBuilder;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.apache.commons.lang3.mutable.MutableInt;
 import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.queryparser.classic.ParseException;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.data.cpe.CpeMemoryIndex;
 import org.owasp.dependencycheck.data.cpe.Fields;
 import org.owasp.dependencycheck.data.cpe.IndexEntry;
 import org.owasp.dependencycheck.data.cpe.IndexException;
+import org.owasp.dependencycheck.data.cpe.MemoryIndex;
 import org.owasp.dependencycheck.data.lucene.LuceneUtils;
 import org.owasp.dependencycheck.data.lucene.SearchFieldAnalyzer;
+import org.owasp.dependencycheck.data.nvd.ecosystem.Ecosystem;
 import org.owasp.dependencycheck.data.nvdcve.CveDB;
 import org.owasp.dependencycheck.data.nvdcve.DatabaseException;
+import org.owasp.dependencycheck.data.update.cpe.CpePlus;
 import org.owasp.dependencycheck.dependency.Confidence;
 import org.owasp.dependencycheck.dependency.Dependency;
 import org.owasp.dependencycheck.dependency.Evidence;
 import org.owasp.dependencycheck.dependency.EvidenceType;
-import org.owasp.dependencycheck.dependency.Identifier;
-import org.owasp.dependencycheck.dependency.VulnerableSoftware;
+import org.owasp.dependencycheck.dependency.naming.CpeIdentifier;
+import org.owasp.dependencycheck.dependency.naming.Identifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
 import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.DependencyVersion;
 import org.owasp.dependencycheck.utils.DependencyVersionUtil;
 import org.owasp.dependencycheck.utils.Settings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import us.springett.parsers.cpe.Cpe;
+import us.springett.parsers.cpe.CpeBuilder;
+import us.springett.parsers.cpe.exceptions.CpeValidationException;
+import us.springett.parsers.cpe.values.Part;
 
 /**
  * CPEAnalyzer is a utility class that takes a project dependency and attempts
@@ -77,13 +96,9 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      */
     private static final Logger LOGGER = LoggerFactory.getLogger(CPEAnalyzer.class);
     /**
-     * The maximum number of query results to return.
-     */
-    private static final int MAX_QUERY_RESULTS = 25;
-    /**
      * The weighting boost to give terms when constructing the Lucene query.
      */
-    private static final String WEIGHTING_BOOST = "^5";
+    private static final int WEIGHTING_BOOST = 1;
     /**
      * A string representation of a regular expression defining characters
      * utilized within the CPE Names. Note, the :/ are included so URLs are
@@ -97,22 +112,35 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      */
     private static final String CLEANSE_NONALPHA_RX = "[^A-Za-z]*";
     /**
-     * The additional size to add to a new StringBuilder to account for extra
-     * data that will be written into the string.
+     * UTF-8 character set name.
      */
-    private static final int STRING_BUILDER_BUFFER = 20;
+    private static final String UTF8 = StandardCharsets.UTF_8.name();
     /**
-     * The URL to perform a search of the NVD CVE data at NIST.
+     * The URL to search the NVD CVE data at NIST. This is used by calling:
+     * <pre>String.format(NVD_SEARCH_URL, vendor, product, version);</pre>
      */
-    public static final String NVD_SEARCH_URL = "https://web.nvd.nist.gov/view/vuln/search-results?adv_search=true&cves=on&cpe_version=%s";
+    public static final String NVD_SEARCH_URL = "https://nvd.nist.gov/vuln/search/results?form_type=Advanced&"
+            + "results_type=overview&search_type=all&cpe_vendor=cpe%%3A%%2F%%3A%1$s&cpe_product=cpe%%3A%%2F%%3A%1$s%%3A%2$s&"
+            + "cpe_version=cpe%%3A%%2F%%3A%1$s%%3A%2$s%%3A%3$s";
+
+    /**
+     * The URL to search the NVD CVE data at NIST. This is used by calling:
+     * <pre>String.format(NVD_SEARCH_URL, vendor, product);</pre>
+     */
+    public static final String NVD_SEARCH_BROAD_URL = "https://nvd.nist.gov/vuln/search/results?form_type=Advanced&"
+            + "results_type=overview&search_type=all&cpe_vendor=cpe%%3A%%2F%%3A%1$s&cpe_product=cpe%%3A%%2F%%3A%1$s%%3A%2$s";
     /**
      * The CPE in memory index.
      */
-    private CpeMemoryIndex cpe;
+    private MemoryIndex cpe;
     /**
      * The CVE Database.
      */
     private CveDB cve;
+    /**
+     * A reference to the ODC engine.
+     */
+    private Engine engine;
     /**
      * The list of ecosystems to skip during analysis. These are skipped because
      * there is generally a more accurate vulnerability analyzer in the
@@ -120,20 +148,17 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      */
     private List<String> skipEcosystems;
     /**
+     * A reference to the ecosystem object; used to obtain the max query results
+     * for each ecosystem.
+     */
+    private Ecosystem ecosystemTools;
+    /**
      * A reference to the suppression analyzer; for timing reasons we need to
      * test for suppressions immediately after identifying the match because a
      * higher confidence match on a FP can mask a lower confidence, yet valid
      * match.
      */
     private CpeSuppressionAnalyzer suppression;
-
-    /**
-     * The minimum score to accept a Lucene match. While this is not recommended
-     * by the Lucene team; this weeds out several false positives. Setting the
-     * score too low results in too many false positives; whereas setting the
-     * score to high will result in false negatives.
-     */
-    private float minLuceneScore = 30;
 
     /**
      * Returns the name of this analyzer.
@@ -165,6 +190,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
     @Override
     public void prepareAnalyzer(Engine engine) throws InitializationException {
         super.prepareAnalyzer(engine);
+        this.engine = engine;
         try {
             this.open(engine.getDatabase());
         } catch (IOException ex) {
@@ -178,12 +204,10 @@ public class CPEAnalyzer extends AbstractAnalyzer {
         if (tmp == null) {
             skipEcosystems = new ArrayList<>();
         } else {
-            LOGGER.info("Skipping CPE Analysis for {}", StringUtils.join(tmp, ","));
+            LOGGER.debug("Skipping CPE Analysis for {}", StringUtils.join(tmp, ","));
             skipEcosystems = Arrays.asList(tmp);
         }
-
-        minLuceneScore = engine.getSettings().getFloat(Settings.KEYS.LUCENE_MIN_SCORE_FILTER, 30);
-
+        ecosystemTools = new Ecosystem(engine.getSettings());
         suppression = new CpeSuppressionAnalyzer();
         suppression.initialize(engine.getSettings());
         suppression.prepareAnalyzer(engine);
@@ -203,7 +227,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
         this.cpe = CpeMemoryIndex.getInstance();
         try {
             final long creationStart = System.currentTimeMillis();
-            cpe.open(cve);
+            cpe.open(cve.getVendorProductList(), this.getSettings());
             final long creationSeconds = TimeUnit.MILLISECONDS.toSeconds(System.currentTimeMillis() - creationStart);
             LOGGER.info("Created CPE Index ({} seconds)", creationSeconds);
         } catch (IndexException ex) {
@@ -235,30 +259,48 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * @throws AnalysisException thrown if the suppression rules failed
      */
     protected void determineCPE(Dependency dependency) throws CorruptIndexException, IOException, ParseException, AnalysisException {
-        String vendors = "";
-        String products = "";
+        boolean identifierAdded;
+
+        final Set<String> majorVersions = dependency.getSoftwareIdentifiers()
+                .stream()
+                .filter(i -> i instanceof PurlIdentifier)
+                .map(i -> {
+                    final PurlIdentifier p = (PurlIdentifier) i;
+                    final DependencyVersion depVersion = DependencyVersionUtil.parseVersion(p.getVersion(), false);
+                    if (depVersion != null) {
+                        return depVersion.getVersionParts().get(0);
+                    }
+                    return null;
+                }).collect(Collectors.toSet());
+
+        final Map<String, MutableInt> vendors = new HashMap<>();
+        final Map<String, MutableInt> products = new HashMap<>();
+        final Set<Integer> previouslyFound = new HashSet<>();
+
         for (Confidence confidence : Confidence.values()) {
-            if (dependency.contains(EvidenceType.VENDOR, confidence)) {
-                vendors = addEvidenceWithoutDuplicateTerms(vendors, dependency.getIterator(EvidenceType.VENDOR, confidence));
-                LOGGER.debug("vendor search: {}", vendors);
-            }
-            if (dependency.contains(EvidenceType.PRODUCT, confidence)) {
-                products = addEvidenceWithoutDuplicateTerms(products, dependency.getIterator(EvidenceType.PRODUCT, confidence));
-                LOGGER.debug("product search: {}", products);
-            }
+            collectTerms(vendors, dependency.getIterator(EvidenceType.VENDOR, confidence));
+            LOGGER.trace("vendor search: {}", vendors);
+            collectTerms(products, dependency.getIterator(EvidenceType.PRODUCT, confidence));
+            addMajorVersionToTerms(majorVersions, products);
+            LOGGER.trace("product search: {}", products);
             if (!vendors.isEmpty() && !products.isEmpty()) {
-                final List<IndexEntry> entries = searchCPE(vendors, products, dependency.getVendorWeightings(),
-                        dependency.getProductWeightings());
+                final List<IndexEntry> entries = searchCPE(vendors, products,
+                        dependency.getVendorWeightings(), dependency.getProductWeightings(),
+                        dependency.getEcosystem());
                 if (entries == null) {
                     continue;
                 }
-                boolean identifierAdded = false;
+
+                identifierAdded = false;
                 for (IndexEntry e : entries) {
-                    LOGGER.debug("Verifying entry: {}", e);
-                    if (verifyEntry(e, dependency)) {
+                    if (previouslyFound.contains(e.getDocumentId()) /*|| (filter > 0 && e.getSearchScore() < filter)*/) {
+                        continue;
+                    }
+                    previouslyFound.add(e.getDocumentId());
+                    if (verifyEntry(e, dependency, majorVersions)) {
                         final String vendor = e.getVendor();
                         final String product = e.getProduct();
-                        LOGGER.debug("identified vendor/product: {}/{}", vendor, product);
+                        LOGGER.trace("identified vendor/product: {}/{}", vendor, product);
                         identifierAdded |= determineIdentifiers(dependency, vendor, product, confidence);
                     }
                 }
@@ -275,32 +317,104 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * the EvidenceCollection (filtered for a specific confidence). This
      * attempts to prevent duplicate terms from being added.</p>
      * <p>
-     * Note, if the evidence is longer then 200 characters it will be
+     * Note, if the evidence is longer then 1000 characters it will be
      * truncated.</p>
      *
-     * @param text the base text
+     * @param terms the collection of terms
      * @param evidence an iterable set of evidence to concatenate
-     * @return the new evidence text
      */
     @SuppressWarnings("null")
-    protected String addEvidenceWithoutDuplicateTerms(final String text, final Iterable<Evidence> evidence) {
-        final String txt = (text == null) ? "" : text;
-        final StringBuilder sb = new StringBuilder(txt.length() * 2);
-        sb.append(' ').append(txt).append(' ');
+
+    protected void collectTerms(Map<String, MutableInt> terms, Iterable<Evidence> evidence) {
         for (Evidence e : evidence) {
-            String value = e.getValue();
+            String value = cleanseText(e.getValue());
+            if (StringUtils.isBlank(value)) {
+                continue;
+            }
             if (value.length() > 1000) {
-                value = value.substring(0, 1000);
-                final int pos = value.lastIndexOf(" ");
+                boolean trimmed = false;
+                int pos = value.lastIndexOf(" ", 1000);
                 if (pos > 0) {
                     value = value.substring(0, pos);
+                    trimmed = true;
+                } else {
+                    pos = value.lastIndexOf(".", 1000);
+                }
+                if (!trimmed) {
+                    if (pos > 0) {
+                        value = value.substring(0, pos);
+                        trimmed = true;
+                    } else {
+                        pos = value.lastIndexOf("-", 1000);
+                    }
+                }
+                if (!trimmed) {
+                    if (pos > 0) {
+                        value = value.substring(0, pos);
+                        trimmed = true;
+                    } else {
+                        pos = value.lastIndexOf("_", 1000);
+                    }
+                }
+                if (!trimmed) {
+                    if (pos > 0) {
+                        value = value.substring(0, pos);
+                        trimmed = true;
+                    } else {
+                        pos = value.lastIndexOf("/", 1000);
+                    }
+                }
+                if (!trimmed && pos > 0) {
+                    value = value.substring(0, pos);
+                    trimmed = true;
+                }
+                if (!trimmed) {
+                    value = value.substring(0, 1000);
                 }
             }
-            if (sb.indexOf(" " + value + " ") < 0) {
-                sb.append(value).append(' ');
-            }
+            addTerm(terms, value);
         }
-        return sb.toString().trim();
+    }
+
+    private void addMajorVersionToTerms(Set<String> majorVersions, Map<String, MutableInt> products) {
+        final Map<String, MutableInt> temp = new HashMap<>();
+        products.entrySet().stream()
+                .filter(term -> term.getKey() != null)
+                .forEach(term -> majorVersions.stream()
+                .filter(version -> version != null
+                && (!term.getKey().endsWith(version)
+                && !Character.isDigit(term.getKey().charAt(term.getKey().length() - 1))
+                && !products.containsKey(term.getKey() + version)))
+                .forEach(version -> {
+                    addTerm(temp, term.getKey() + version);
+                }));
+        products.entrySet().stream()
+                .filter(term -> term.getKey() != null)
+                .forEach(term -> majorVersions.stream()
+                .filter(Objects::nonNull)
+                .map(version -> "v" + version)
+                .filter(version -> (!term.getKey().endsWith(version)
+                && !Character.isDigit(term.getKey().charAt(term.getKey().length() - 1))
+                && !products.containsKey(term.getKey() + version)))
+                .forEach(version -> {
+                    addTerm(temp, term.getKey() + version);
+                }));
+        products.putAll(temp);
+    }
+
+    /**
+     * Adds a term to the map of terms.
+     *
+     * @param terms the map of terms
+     * @param value the value of the term to add
+     */
+    private void addTerm(Map<String, MutableInt> terms, String value) {
+        final MutableInt count = terms.get(value);
+        if (count == null) {
+            terms.put(value, new MutableInt(1));
+        } else {
+            count.add(1);
+        }
     }
 
     /**
@@ -318,36 +432,48 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * to the vendor field
      * @param productWeightings Adds a list of strings that will be used to add
      * weighting factors to the product search
+     * @param ecosystem the dependency's ecosystem
      * @return a list of possible CPE values
      */
-    protected List<IndexEntry> searchCPE(String vendor, String product,
-            Set<String> vendorWeightings, Set<String> productWeightings) {
+    protected List<IndexEntry> searchCPE(Map<String, MutableInt> vendor, Map<String, MutableInt> product,
+            Set<String> vendorWeightings, Set<String> productWeightings, String ecosystem) {
 
-        final List<IndexEntry> ret = new ArrayList<>(MAX_QUERY_RESULTS);
+        final int maxQueryResults = ecosystemTools.getLuceneMaxQueryLimitFor(ecosystem);
+        final List<IndexEntry> ret = new ArrayList<>(maxQueryResults);
 
         final String searchString = buildSearch(vendor, product, vendorWeightings, productWeightings);
         if (searchString == null) {
             return ret;
         }
         try {
-            final TopDocs docs = cpe.search(searchString, MAX_QUERY_RESULTS);
+            final Query query = cpe.parseQuery(searchString);
+            final TopDocs docs = cpe.search(query, maxQueryResults);
+
             for (ScoreDoc d : docs.scoreDocs) {
+                //if (d.score >= minLuceneScore) {
                 final Document doc = cpe.getDocument(d.doc);
-                if (d.score >= minLuceneScore) {
-                    //final Document doc = cpe.getDocument(d.doc);
-                    final IndexEntry entry = new IndexEntry();
-                    entry.setVendor(doc.get(Fields.VENDOR));
-                    entry.setProduct(doc.get(Fields.PRODUCT));
-                    entry.setSearchScore(d.score);
-                    if (!ret.contains(entry)) {
-                        ret.add(entry);
-                    }
+                final IndexEntry entry = new IndexEntry();
+                entry.setDocumentId(d.doc);
+                entry.setVendor(doc.get(Fields.VENDOR));
+                entry.setProduct(doc.get(Fields.PRODUCT));
+                entry.setSearchScore(d.score);
+
+//                LOGGER.error("Explanation: ---------------------");
+//                LOGGER.error("Explanation: " + entry.getVendor() + " " + entry.getProduct() + " " + entry.getSearchScore());
+//                LOGGER.error("Explanation: " + searchString);
+//                LOGGER.error("Explanation: " + cpe.explain(query, d.doc));
+                if (!ret.contains(entry)) {
+                    ret.add(entry);
                 }
+                //}
             }
             return ret;
         } catch (ParseException ex) {
             LOGGER.warn("An error occurred querying the CPE data. See the log for more details.");
             LOGGER.info("Unable to parse: {}", searchString, ex);
+        } catch (IndexException ex) {
+            LOGGER.warn("An error occurred resetting the CPE index searcher. See the log for more details.");
+            LOGGER.info("Unable to reset the search analyzer", ex);
         } catch (IOException ex) {
             LOGGER.warn("An error occurred reading CPE data. See the log for more details.");
             LOGGER.info("IO Error with search string: {}", searchString, ex);
@@ -373,18 +499,16 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * boost the terms weight
      * @return the Lucene query
      */
-    protected String buildSearch(String vendor, String product,
+    protected String buildSearch(Map<String, MutableInt> vendor, Map<String, MutableInt> product,
             Set<String> vendorWeighting, Set<String> productWeightings) {
-        final String v = vendor; //.replaceAll("[^\\w\\d]", " ");
-        final String p = product; //.replaceAll("[^\\w\\d]", " ");
-        final StringBuilder sb = new StringBuilder(v.length() + p.length()
-                + Fields.PRODUCT.length() + Fields.VENDOR.length() + STRING_BUILDER_BUFFER);
 
-        if (!appendWeightedSearch(sb, Fields.PRODUCT, p, productWeightings)) {
+        final StringBuilder sb = new StringBuilder();
+
+        if (!appendWeightedSearch(sb, Fields.PRODUCT, product, productWeightings)) {
             return null;
         }
         sb.append(" AND ");
-        if (!appendWeightedSearch(sb, Fields.VENDOR, v, vendorWeighting)) {
+        if (!appendWeightedSearch(sb, Fields.VENDOR, vendor, vendorWeighting)) {
             return null;
         }
         return sb.toString();
@@ -399,58 +523,65 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * @param sb a StringBuilder that the query text will be appended to.
      * @param field the field within the Lucene index that the query is
      * searching.
-     * @param searchText text used to construct the query.
+     * @param terms text used to construct the query.
      * @param weightedText a list of terms that will be considered higher
      * importance when searching.
      * @return if the append was successful.
      */
-    private boolean appendWeightedSearch(StringBuilder sb, String field, String searchText, Set<String> weightedText) {
-        sb.append(field).append(":(");
-
-        final String cleanText = cleanseText(searchText);
-
-        if (cleanText.isEmpty()) {
+    @SuppressWarnings("StringSplitter")
+    private boolean appendWeightedSearch(StringBuilder sb, String field, Map<String, MutableInt> terms, Set<String> weightedText) {
+        if (terms.isEmpty()) {
             return false;
         }
+        sb.append(field).append(":(");
+        boolean addSpace = false;
+        boolean addedTerm = false;
 
-        if (weightedText == null || weightedText.isEmpty()) {
-            LuceneUtils.appendEscapedLuceneQuery(sb, cleanText);
-        } else {
-            boolean addSpace = false;
-            final StringTokenizer tokens = new StringTokenizer(cleanText);
-            while (tokens.hasMoreElements()) {
-                final String word = tokens.nextToken();
-                StringBuilder temp = null;
-                for (String weighted : weightedText) {
-                    final String weightedStr = cleanseText(weighted);
-                    if (equalsIgnoreCaseAndNonAlpha(word, weightedStr)) {
-                        temp = new StringBuilder(word.length() + 2);
-                        LuceneUtils.appendEscapedLuceneQuery(temp, word);
-                        temp.append(WEIGHTING_BOOST);
-                        if (!word.equalsIgnoreCase(weightedStr)) {
-                            if (temp.length() > 0) {
-                                temp.append(' ');
-                            }
-                            LuceneUtils.appendEscapedLuceneQuery(temp, weightedStr);
-                            temp.append(WEIGHTING_BOOST);
-                        }
-                        break;
-                    }
+        for (Map.Entry<String, MutableInt> entry : terms.entrySet()) {
+            final StringBuilder boostedTerms = new StringBuilder();
+            final int weighting = entry.getValue().intValue();
+            final String[] text = entry.getKey().split(" ");
+            for (String word : text) {
+                if (word.isEmpty()) {
+                    continue;
                 }
                 if (addSpace) {
-                    sb.append(' ');
+                    sb.append(" ");
                 } else {
                     addSpace = true;
                 }
-                if (temp == null) {
+                addedTerm = true;
+                if (LuceneUtils.isKeyword(word)) {
+                    sb.append("\"");
                     LuceneUtils.appendEscapedLuceneQuery(sb, word);
+                    sb.append("\"");
                 } else {
-                    sb.append(temp);
+                    LuceneUtils.appendEscapedLuceneQuery(sb, word);
                 }
+                final String boostTerm = findBoostTerm(word, weightedText);
+
+                //The weighting is on a full phrase rather then at a term level for vendor or products
+                //TODO - should the weighting be at a "word" level as opposed to phrase level? Or combined word and phrase?
+                //remember the reason we are counting the frequency of "phrases" as opposed to terms is that
+                //we need to keep the correct sequence of terms from the evidence so the term concatenating analyzer
+                //works correctly and will causes searches to take spring framework and produce: spring springframework framework
+                if (boostTerm != null) {
+                    sb.append("^").append(weighting + WEIGHTING_BOOST);
+                    if (!boostTerm.equals(word)) {
+                        boostedTerms.append(" ");
+                        LuceneUtils.appendEscapedLuceneQuery(boostedTerms, boostTerm);
+                        boostedTerms.append("^").append(weighting + WEIGHTING_BOOST);
+                    }
+                } else if (weighting > 1) {
+                    sb.append("^").append(weighting);
+                }
+            }
+            if (boostedTerms.length() > 0) {
+                sb.append(boostedTerms);
             }
         }
         sb.append(")");
-        return true;
+        return addedTerm;
     }
 
     /**
@@ -462,6 +593,24 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      */
     private String cleanseText(String text) {
         return text.replaceAll(CLEANSE_CHARACTER_RX, " ");
+    }
+
+    /**
+     * Searches the collection of boost terms for the given term. The elements
+     * are case insensitive matched using only the alpha-numeric contents of the
+     * terms; all other characters are removed.
+     *
+     * @param term the term to search for
+     * @param boost the collection of boost terms
+     * @return the value identified
+     */
+    private String findBoostTerm(String term, Set<String> boost) {
+        for (String entry : boost) {
+            if (equalsIgnoreCaseAndNonAlpha(term, entry)) {
+                return entry;
+            }
+        }
+        return null;
     }
 
     /**
@@ -487,21 +636,59 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * that the product, vendor, and version information for the CPE are
      * contained within the dependencies evidence.
      *
-     * @param entry a CPE entry.
-     * @param dependency the dependency that the CPE entries could be for.
+     * @param entry a CPE entry
+     * @param dependency the dependency that the CPE entries could be for
+     * @param majorVersions the major versions detected for the dependency
      * @return whether or not the entry is valid.
      */
-    private boolean verifyEntry(final IndexEntry entry, final Dependency dependency) {
+    private boolean verifyEntry(final IndexEntry entry, final Dependency dependency,
+            final Set<String> majorVersions) {
         boolean isValid = false;
-
         //TODO - does this nullify some of the fuzzy matching that happens in the lucene search?
         // for instance CPE some-component and in the evidence we have SomeComponent.
-        if (collectionContainsString(dependency.getEvidence(EvidenceType.PRODUCT), entry.getProduct())
-                && collectionContainsString(dependency.getEvidence(EvidenceType.VENDOR), entry.getVendor())) {
-            //&& collectionContainsVersion(dependency.getVersionEvidence(), entry.getVersion())
-            isValid = true;
+
+        //TODO - should this have a package manager only flag instead of just looking for NPM
+        if (Ecosystem.NODEJS.equals(dependency.getEcosystem())) {
+            for (Identifier i : dependency.getSoftwareIdentifiers()) {
+                if (i instanceof PurlIdentifier) {
+                    final PurlIdentifier p = (PurlIdentifier) i;
+                    if (cleanPackageName(p.getName()).equals(cleanPackageName(entry.getProduct()))) {
+                        isValid = true;
+                    }
+                }
+            }
+        } else if (collectionContainsString(dependency.getEvidence(EvidenceType.VENDOR), entry.getVendor())) {
+            if (collectionContainsString(dependency.getEvidence(EvidenceType.PRODUCT), entry.getProduct())) {
+                isValid = true;
+            } else {
+                isValid = majorVersions.stream().filter(version
+                        -> version != null && entry.getProduct().endsWith("v" + version) && entry.getProduct().length() > version.length() + 1)
+                        .anyMatch(version
+                                -> collectionContainsString(dependency.getEvidence(EvidenceType.PRODUCT),
+                                entry.getProduct().substring(0, entry.getProduct().length() - version.length() - 1))
+                        );
+                isValid |= majorVersions.stream().filter(version
+                        -> version != null && entry.getProduct().endsWith(version) && entry.getProduct().length() > version.length())
+                        .anyMatch(version
+                                -> collectionContainsString(dependency.getEvidence(EvidenceType.PRODUCT),
+                                entry.getProduct().substring(0, entry.getProduct().length() - version.length()))
+                        );
+            }
         }
         return isValid;
+    }
+
+    /**
+     * Only returns alpha numeric characters contained in a given package name.
+     *
+     * @param name the package name to cleanse
+     * @return the cleansed packaage name
+     */
+    private String cleanPackageName(String name) {
+        if (name == null) {
+            return "";
+        }
+        return name.replaceAll("[^a-zA-Z0-9]+", "");
     }
 
     /**
@@ -511,19 +698,25 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * @param text the text to search for
      * @return whether or not the EvidenceCollection contains the string
      */
+    @SuppressWarnings("StringSplitter")
     private boolean collectionContainsString(Set<Evidence> evidence, String text) {
         //TODO - likely need to change the split... not sure if this will work for CPE with special chars
         if (text == null) {
             return false;
         }
-        final String[] words = text.split("[\\s_-]");
+        // Check if we have an exact match
+        final String textLC = text.toLowerCase();
+        for (Evidence e : evidence) {
+            if (e.getValue().toLowerCase().equals(textLC)) {
+                return true;
+            }
+        }
+
+        final String[] words = text.split("[\\s_-]+");
         final List<String> list = new ArrayList<>();
         String tempWord = null;
         final CharArraySet stopWords = SearchFieldAnalyzer.getStopWords();
         for (String word : words) {
-            if (stopWords.contains(word)) {
-                continue;
-            }
             /*
              single letter words should be concatenated with the next word.
              so { "m", "core", "sample" } -> { "mcore", "sample" }
@@ -534,6 +727,9 @@ public class CPEAnalyzer extends AbstractAnalyzer {
             } else if (word.length() <= 2) {
                 tempWord = word;
             } else {
+                if (stopWords.contains(word)) {
+                    continue;
+                }
                 list.add(word);
             }
         }
@@ -549,11 +745,17 @@ public class CPEAnalyzer extends AbstractAnalyzer {
             return false;
         }
         boolean isValid = true;
+
+        // Prepare the evidence values, e.g. remove the characters we used for splitting
+        final List<String> evidenceValues = new ArrayList<>(evidence.size());
+        evidence.forEach((e) -> evidenceValues.add(e.getValue().toLowerCase().replaceAll("[\\s_-]+", "")));
+
         for (String word : list) {
+            word = word.toLowerCase();
             boolean found = false;
-            for (Evidence e : evidence) {
-                if (e.getValue().toLowerCase().contains(word.toLowerCase())) {
-                    if ("http".equals(word) && e.getValue().contains("http:")) {
+            for (String e : evidenceValues) {
+                if (e.contains(word)) {
+                    if ("http".equals(word) && e.contains("http:")) {
                         continue;
                     }
                     found = true;
@@ -561,9 +763,6 @@ public class CPEAnalyzer extends AbstractAnalyzer {
                 }
             }
             isValid &= found;
-            if (!isValid) {
-                break;
-            }
         }
         return isValid;
     }
@@ -610,77 +809,80 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      * @throws UnsupportedEncodingException is thrown if UTF-8 is not supported
      * @throws AnalysisException thrown if the suppression rules failed
      */
+    @SuppressWarnings("StringSplitter")
     protected boolean determineIdentifiers(Dependency dependency, String vendor, String product,
             Confidence currentConfidence) throws UnsupportedEncodingException, AnalysisException {
-        final Set<VulnerableSoftware> cpes = cve.getCPEs(vendor, product);
-        if (cpes.isEmpty()) {
+
+        final CpeBuilder cpeBuilder = new CpeBuilder();
+
+        final Set<CpePlus> cpePlusEntries = cve.getCPEs(vendor, product);
+        final Set<Cpe> cpes = filterEcosystem(dependency.getEcosystem(), cpePlusEntries);
+        if (cpes == null || cpes.isEmpty()) {
             return false;
         }
-        DependencyVersion bestGuess = new DependencyVersion("-");
+
+        DependencyVersion bestGuess;
+        if ("Golang".equals(dependency.getEcosystem()) && dependency.getVersion() == null) {
+            bestGuess = new DependencyVersion("*");
+        } else {
+            bestGuess = new DependencyVersion("-");
+        }
+        String bestGuessUpdate = null;
         Confidence bestGuessConf = null;
         String bestGuessURL = null;
-        boolean hasBroadMatch = false;
-        final List<IdentifierMatch> collected = new ArrayList<>();
+        final Set<IdentifierMatch> collected = new HashSet<>();
+
+        considerDependencyVersion(dependency, vendor, product, currentConfidence, collected);
 
         //TODO the following algorithm incorrectly identifies things as a lower version
         // if there lower confidence evidence when the current (highest) version number
         // is newer then anything in the NVD.
         for (Confidence conf : Confidence.values()) {
             for (Evidence evidence : dependency.getIterator(EvidenceType.VERSION, conf)) {
-                final DependencyVersion evVer = DependencyVersionUtil.parseVersion(evidence.getValue());
+                final DependencyVersion evVer = DependencyVersionUtil.parseVersion(evidence.getValue(), true);
                 if (evVer == null) {
                     continue;
                 }
-
-                int maxDepth = 0;
-                for (VulnerableSoftware vs : cpes) {
-                    final DependencyVersion dbVer = DependencyVersionUtil.parseVersion(vs.getVersion());
-                    if (dbVer != null) {
-                        final int count = dbVer.getVersionParts().size();
-                        if (count > maxDepth) {
-                            maxDepth = count;
-                        }
-                    }
-                }
-
                 DependencyVersion evBaseVer = null;
-                //Only semantic versions used in NVD and evidence may contain an update version
-                if (maxDepth == 3 && evVer.getVersionParts().size() == 4) {
-                    final String update = evVer.getVersionParts().get(3);
-                    if (update.matches("^(v|beta|alpha|u|rc|m|20\\d\\d).*$")) {
+                String evBaseVerUpdate = null;
+                final int idx = evVer.getVersionParts().size() - 1;
+                if (evVer.getVersionParts().get(idx)
+                        .matches("^(v|release|final|snapshot|beta|alpha|u|rc|m|20\\d\\d).*$")) {
+                    //store the update version
+                    final String checkUpdate = evVer.getVersionParts().get(idx);
+                    if (checkUpdate.matches("^(v|release|final|snapshot|beta|alpha|u|rc|m|20\\d\\d).*$")) {
+                        evBaseVerUpdate = checkUpdate;
                         evBaseVer = new DependencyVersion();
-                        evBaseVer.setVersionParts(evVer.getVersionParts().subList(0, 3));
+                        evBaseVer.setVersionParts(evVer.getVersionParts().subList(0, idx));
                     }
                 }
-
-                for (VulnerableSoftware vs : cpes) {
-                    final DependencyVersion dbVer;
-                    if (vs.getUpdate() != null && !vs.getUpdate().isEmpty() && !vs.getUpdate().startsWith("~")) {
-                        dbVer = DependencyVersionUtil.parseVersion(vs.getVersion() + '.' + vs.getUpdate());
-                    } else {
-                        dbVer = DependencyVersionUtil.parseVersion(vs.getVersion());
+                //TODO - review and update for new JSON data
+                for (Cpe vs : cpes) {
+                    final DependencyVersion dbVer = DependencyVersionUtil.parseVersion(vs.getVersion());
+                    DependencyVersion dbVerUpdate = dbVer;
+                    if (vs.getUpdate() != null && !vs.getUpdate().isEmpty() && !vs.getUpdate().startsWith("*") && !vs.getUpdate().startsWith("-")) {
+                        dbVerUpdate = DependencyVersionUtil.parseVersion(vs.getVersion() + '.' + vs.getUpdate(), true);
                     }
                     if (dbVer == null) { //special case, no version specified - everything is vulnerable
-                        hasBroadMatch = true;
-                        final String url = String.format(NVD_SEARCH_URL, URLEncoder.encode(vs.getName(), StandardCharsets.UTF_8.name()));
-                        final IdentifierMatch match = new IdentifierMatch("cpe", vs.getName(), url, IdentifierConfidence.BROAD_MATCH, conf);
+                        final String url = String.format(NVD_SEARCH_BROAD_URL, URLEncoder.encode(vs.getVendor(), UTF8),
+                                URLEncoder.encode(vs.getProduct(), UTF8));
+                        final IdentifierMatch match = new IdentifierMatch(vs, url, IdentifierConfidence.BROAD_MATCH, conf);
                         collected.add(match);
-                    } else if (evVer.equals(dbVer)) { //yeah! exact match
-                        final String url = String.format(NVD_SEARCH_URL, URLEncoder.encode(vs.getName(), StandardCharsets.UTF_8.name()));
-                        final IdentifierMatch match = new IdentifierMatch("cpe", vs.getName(), url, IdentifierConfidence.EXACT_MATCH, conf);
-                        collected.add(match);
+                    } else if (evVer.equals(dbVer)) {
+                        addExactMatch(vs, evBaseVerUpdate, conf, collected);
                     } else if (evBaseVer != null && evBaseVer.equals(dbVer)
                             && (bestGuessConf == null || bestGuessConf.compareTo(conf) > 0)) {
                         bestGuessConf = conf;
                         bestGuess = dbVer;
-                        bestGuessURL = String.format(NVD_SEARCH_URL, URLEncoder.encode(vs.getName(), StandardCharsets.UTF_8.name()));
-
-                        //TODO the following isn't quite right is it? need to think about this guessing game a bit more.
-                    } else if (evVer.getVersionParts().size() <= dbVer.getVersionParts().size()
-                            && evVer.matchesAtLeastThreeLevels(dbVer)) {
+                        bestGuessUpdate = evBaseVerUpdate;
+                        bestGuessURL = String.format(NVD_SEARCH_URL, URLEncoder.encode(vs.getVendor(), UTF8),
+                                URLEncoder.encode(vs.getProduct(), UTF8), URLEncoder.encode(vs.getVersion(), UTF8));
+                    } else if (dbVerUpdate != null && evVer.getVersionParts().size() <= dbVerUpdate.getVersionParts().size()
+                            && evVer.matchesAtLeastThreeLevels(dbVerUpdate)) {
                         if (bestGuessConf == null || bestGuessConf.compareTo(conf) > 0) {
                             if (bestGuess.getVersionParts().size() < dbVer.getVersionParts().size()) {
                                 bestGuess = dbVer;
+                                bestGuessUpdate = evBaseVerUpdate;
                                 bestGuessConf = conf;
                             }
                         }
@@ -689,48 +891,196 @@ public class CPEAnalyzer extends AbstractAnalyzer {
                 if ((bestGuessConf == null || bestGuessConf.compareTo(conf) > 0)
                         && bestGuess.getVersionParts().size() < evVer.getVersionParts().size()) {
                     bestGuess = evVer;
+                    bestGuessUpdate = evBaseVerUpdate;
                     bestGuessConf = conf;
                 }
             }
         }
-        final String cpeName = String.format("cpe:/a:%s:%s:%s", vendor, product, bestGuess.toString());
-        String url = null;
-        if (hasBroadMatch) { //if we have a broad match we can add the URL to the best guess.
-            final String cpeUrlName = String.format("cpe:/a:%s:%s", vendor, product);
-            url = String.format(NVD_SEARCH_URL, URLEncoder.encode(cpeUrlName, StandardCharsets.UTF_8.name()));
-        }
-        if (bestGuessURL != null) {
-            url = bestGuessURL;
-        }
-        if (bestGuessConf == null) {
-            bestGuessConf = Confidence.LOW;
-        }
-        final IdentifierMatch match = new IdentifierMatch("cpe", cpeName, url, IdentifierConfidence.BEST_GUESS, bestGuessConf);
 
-        collected.add(match);
+        cpeBuilder.part(Part.APPLICATION).vendor(vendor).product(product);
+        final int idx = bestGuess.getVersionParts().size() - 1;
+        if (bestGuess.getVersionParts().get(idx)
+                .matches("^(v|release|final|snapshot|beta|alpha|u|rc|m|20\\d\\d).*$")) {
+            cpeBuilder.version(StringUtils.join(bestGuess.getVersionParts().subList(0, idx), "."));
+            //when written - no update versions in the NVD start with v### - they all strip the v off
+            if (bestGuess.getVersionParts().get(idx).matches("^v\\d.*$")) {
+                cpeBuilder.update(bestGuess.getVersionParts().get(idx).substring(1));
+            } else {
+                cpeBuilder.update(bestGuess.getVersionParts().get(idx));
+            }
+        } else {
+            cpeBuilder.version(bestGuess.toString());
+            if (bestGuessUpdate != null) {
+                cpeBuilder.update(bestGuessUpdate);
+            }
+        }
+        final Cpe guessCpe;
 
-        Collections.sort(collected);
-        final IdentifierConfidence bestIdentifierQuality = collected.get(0).getConfidence();
-        final Confidence bestEvidenceQuality = collected.get(0).getEvidenceConfidence();
+        try {
+            guessCpe = cpeBuilder.build();
+        } catch (CpeValidationException ex) {
+            throw new AnalysisException(String.format("Unable to create a CPE for %s:%s:%s", vendor, product, bestGuess));
+        }
+        if (!"-".equals(guessCpe.getVersion())) {
+            String url = null;
+            if (bestGuessURL != null) {
+                url = bestGuessURL;
+            }
+            if (bestGuessConf == null) {
+                bestGuessConf = Confidence.LOW;
+            }
+            final IdentifierMatch match = new IdentifierMatch(guessCpe, url, IdentifierConfidence.BEST_GUESS, bestGuessConf);
+
+            collected.add(match);
+        }
         boolean identifierAdded = false;
-        for (IdentifierMatch m : collected) {
-            if (bestIdentifierQuality.equals(m.getConfidence())
-                    && bestEvidenceQuality.equals(m.getEvidenceConfidence())) {
-                final Identifier i = m.getIdentifier();
-                if (bestIdentifierQuality == IdentifierConfidence.BEST_GUESS) {
-                    i.setConfidence(Confidence.LOW);
-                } else {
-                    i.setConfidence(bestEvidenceQuality);
-                }
-                //TODO - while this gets the job down it is slow; consider refactoring
-                dependency.addIdentifier(i);
-                suppression.analyze(dependency, null);
-                if (dependency.getIdentifiers().contains(i)) {
-                    identifierAdded = true;
+        if (!collected.isEmpty()) {
+            final List<IdentifierMatch> items = new ArrayList<>(collected);
+
+            Collections.sort(items);
+            final IdentifierConfidence bestIdentifierQuality = items.get(0).getIdentifierConfidence();
+            final Confidence bestEvidenceQuality = items.get(0).getEvidenceConfidence();
+            boolean addedNonGuess = false;
+            final Confidence prevAddedConfidence = dependency.getVulnerableSoftwareIdentifiers().stream().map(Identifier::getConfidence)
+                    .min(Comparator.comparing(Confidence::ordinal))
+                    .orElse(Confidence.LOW);
+
+            for (IdentifierMatch m : items) {
+                if (bestIdentifierQuality.equals(m.getIdentifierConfidence())
+                        && bestEvidenceQuality.equals(m.getEvidenceConfidence())) {
+                    final CpeIdentifier i = m.getIdentifier();
+                    if (bestIdentifierQuality == IdentifierConfidence.BEST_GUESS) {
+                        if (addedNonGuess) {
+                            continue;
+                        }
+                        i.setConfidence(Confidence.LOW);
+                    } else {
+                        i.setConfidence(bestEvidenceQuality);
+                    }
+                    if (prevAddedConfidence.compareTo(i.getConfidence()) < 0) {
+                        continue;
+                    }
+
+                    //TODO - while this gets the job down it is slow; consider refactoring
+                    dependency.addVulnerableSoftwareIdentifier(i);
+                    suppression.analyze(dependency, engine);
+                    if (dependency.getVulnerableSoftwareIdentifiers().contains(i)) {
+                        identifierAdded = true;
+                        if (!addedNonGuess && bestIdentifierQuality != IdentifierConfidence.BEST_GUESS) {
+                            addedNonGuess = true;
+                        }
+                    }
                 }
             }
         }
         return identifierAdded;
+    }
+
+    /**
+     * Adds a new CPE to the identifier match collection.
+     *
+     * @param vs a reference to the vulnerable software
+     * @param updateVersion the update version
+     * @param conf the current confidence
+     * @param collected a reference to the collected identifiers
+     * @throws UnsupportedEncodingException thrown if UTF-8 is not supported
+     */
+    private void addExactMatch(Cpe vs, String updateVersion, Confidence conf,
+            final Set<IdentifierMatch> collected) throws UnsupportedEncodingException {
+
+        final CpeBuilder cpeBuilder = new CpeBuilder();
+        final String url = String.format(NVD_SEARCH_URL, URLEncoder.encode(vs.getVendor(), UTF8),
+                URLEncoder.encode(vs.getProduct(), UTF8), URLEncoder.encode(vs.getVersion(), UTF8));
+        Cpe useCpe;
+        if (updateVersion != null && "*".equals(vs.getUpdate())) {
+            try {
+                useCpe = cpeBuilder.part(vs.getPart()).wfVendor(vs.getWellFormedVendor())
+                        .wfProduct(vs.getWellFormedProduct()).wfVersion(vs.getWellFormedVersion())
+                        .wfEdition(vs.getWellFormedEdition()).wfLanguage(vs.getWellFormedLanguage())
+                        .wfOther(vs.getWellFormedOther()).wfSwEdition(vs.getWellFormedSwEdition())
+                        .update(updateVersion).build();
+            } catch (CpeValidationException ex) {
+                LOGGER.debug("Error building cpe with update:" + updateVersion, ex);
+                useCpe = vs;
+            }
+        } else {
+            useCpe = vs;
+        }
+        final IdentifierMatch match = new IdentifierMatch(useCpe, url, IdentifierConfidence.EXACT_MATCH, conf);
+        collected.add(match);
+    }
+
+    /**
+     * Evaluates whether or not to use the `version` of the dependency instead
+     * of the version evidence. The dependency should not always be used as it
+     * can cause FP.
+     *
+     * @param dependency the dependency being analyzed
+     * @param product the product name
+     * @param vendor the vendor name
+     * @param confidence the current confidence level
+     * @param collected a reference to the identifiers matched
+     * @throws AnalysisException thrown if aliens attacked and valid input could
+     * not be used to construct a CPE
+     * @throws UnsupportedEncodingException thrown if run on a system that
+     * doesn't support UTF-8
+     */
+    private void considerDependencyVersion(Dependency dependency,
+            String vendor, String product, Confidence confidence,
+            final Set<IdentifierMatch> collected)
+            throws AnalysisException, UnsupportedEncodingException {
+
+        if (dependency.getVersion() != null && !dependency.getVersion().isEmpty()) {
+            final CpeBuilder cpeBuilder = new CpeBuilder();
+            boolean useDependencyVersion = true;
+            final CharArraySet stopWords = SearchFieldAnalyzer.getStopWords();
+            if (dependency.getName() != null && !dependency.getName().isEmpty()) {
+                final String name = dependency.getName();
+                for (String word : product.split("[^a-zA-Z0-9]")) {
+                    useDependencyVersion &= name.contains(word) || stopWords.contains(word)
+                            || wordMatchesEcosystem(dependency.getEcosystem(), word);
+                }
+            }
+
+            if (useDependencyVersion) {
+                //TODO - we need to filter this so that we only use this if something in the
+                //dependency.getName() matches the vendor/product in some way
+                final DependencyVersion depVersion = new DependencyVersion(dependency.getVersion());
+                if (depVersion.getVersionParts().size() > 0) {
+                    cpeBuilder.part(Part.APPLICATION).vendor(vendor).product(product);
+                    addVersionAndUpdate(depVersion, cpeBuilder);
+                    try {
+                        final Cpe depCpe = cpeBuilder.build();
+                        final String url = String.format(NVD_SEARCH_URL, URLEncoder.encode(vendor, UTF8),
+                                URLEncoder.encode(product, UTF8), URLEncoder.encode(depCpe.getVersion(), UTF8));
+                        final IdentifierMatch match = new IdentifierMatch(depCpe, url, IdentifierConfidence.EXACT_MATCH, confidence);
+                        collected.add(match);
+                    } catch (CpeValidationException ex) {
+                        throw new AnalysisException(String.format("Unable to create a CPE for %s:%s:%s", vendor, product, depVersion));
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * If a CPE product word represents the ecosystem of a dependency it is not required
+     * to appear in the dependencyName to still consider the CPE product a match.
+     *
+     * @param ecosystem The ecosystem of the dependency
+     * @param word       The word from the CPE product to check
+     * @return {@code true} when the CPE product word is known to match the ecosystem of the dependency
+     * @implNote This method is not intended to cover every possible case where the ecosystem is represented by the word. It is a
+     * best-effort attempt to prevent {@link #considerDependencyVersion(Dependency, String, String, Confidence, Set)}
+     * from not taking an exact-match versioned CPE into account because the ecosystem-related word does not appear in
+     * the dependencyName. It helps prevent false-positive cases like https://github.com/jeremylong/DependencyCheck/issues/5545
+     * @see #considerDependencyVersion(Dependency, String, String, Confidence, Set)
+     */
+    private boolean wordMatchesEcosystem(@Nullable String ecosystem, String word) {
+        if (Ecosystem.JAVA.equalsIgnoreCase(word)) {
+            return Ecosystem.JAVA.equals(ecosystem);
+        }
+        return false;
     }
 
     /**
@@ -742,6 +1092,55 @@ public class CPEAnalyzer extends AbstractAnalyzer {
     @Override
     protected String getAnalyzerEnabledSettingKey() {
         return Settings.KEYS.ANALYZER_CPE_ENABLED;
+    }
+
+    /**
+     * Filters the given list of CPE Entries (plus ecosystem) for the given
+     * dependencies ecosystem.
+     *
+     * @param ecosystem the dependencies ecosystem
+     * @param entries the CPE Entries (plus ecosystem)
+     * @return the filtered list of CPE entries
+     */
+    private Set<Cpe> filterEcosystem(String ecosystem, Set<CpePlus> entries) {
+        if (entries == null || entries.isEmpty()) {
+            return null;
+        }
+        if (ecosystem != null) {
+            return entries.stream().filter(c
+                    -> c.getEcosystem() == null
+                    || c.getEcosystem().equals(ecosystem)
+                    //some ios CVE/CPEs are listed under native
+                    || (Ecosystem.IOS.equals(ecosystem) && Ecosystem.NATIVE.equals(c.getEcosystem())))
+                    .map(CpePlus::getCpe)
+                    .collect(Collectors.toSet());
+        }
+        return entries.stream()
+                .map(CpePlus::getCpe)
+                .collect(Collectors.toSet());
+    }
+
+    /**
+     * Add the given version to the CpeBuilder - this method attempts to parse
+     * out the update from the version and correctly set the value in the CPE.
+     *
+     * @param depVersion the version to add
+     * @param cpeBuilder a reference to the CPE Builder
+     */
+    private void addVersionAndUpdate(DependencyVersion depVersion, final CpeBuilder cpeBuilder) {
+        final int idx = depVersion.getVersionParts().size() - 1;
+        if (idx > 0 && depVersion.getVersionParts().get(idx)
+                .matches("^(v|final|release|snapshot|r|b|beta|a|alpha|u|rc|sp|dev|revision|service|build|pre|p|patch|update|m|20\\d\\d).*$")) {
+            cpeBuilder.version(StringUtils.join(depVersion.getVersionParts().subList(0, idx), "."));
+            //when written - no update versions in the NVD start with v### - they all strip the v off
+            if (depVersion.getVersionParts().get(idx).matches("^v\\d.*$")) {
+                cpeBuilder.update(depVersion.getVersionParts().get(idx).substring(1));
+            } else {
+                cpeBuilder.update(depVersion.getVersionParts().get(idx));
+            }
+        } else {
+            cpeBuilder.version(depVersion.toString());
+        }
     }
 
     /**
@@ -772,33 +1171,27 @@ public class CPEAnalyzer extends AbstractAnalyzer {
     private static class IdentifierMatch implements Comparable<IdentifierMatch> {
 
         /**
-         * The confidence in the evidence used to identify this match.
-         */
-        private Confidence evidenceConfidence;
-        /**
          * The confidence whether this is an exact match, or a best guess.
          */
-        private IdentifierConfidence confidence;
+        private IdentifierConfidence identifierConfidence;
         /**
          * The CPE identifier.
          */
-        private Identifier identifier;
+        private CpeIdentifier identifier;
 
         /**
          * Constructs an IdentifierMatch.
          *
-         * @param type the type of identifier (such as CPE)
-         * @param value the value of the identifier
+         * @param cpe the CPE value for the match
          * @param url the URL of the identifier
          * @param identifierConfidence the confidence in the identifier: best
          * guess or exact match
          * @param evidenceConfidence the confidence of the evidence used to find
          * the identifier
          */
-        IdentifierMatch(String type, String value, String url, IdentifierConfidence identifierConfidence, Confidence evidenceConfidence) {
-            this.identifier = new Identifier(type, value, url);
-            this.confidence = identifierConfidence;
-            this.evidenceConfidence = evidenceConfidence;
+        IdentifierMatch(Cpe cpe, String url, IdentifierConfidence identifierConfidence, Confidence evidenceConfidence) {
+            this.identifier = new CpeIdentifier(cpe, url, evidenceConfidence);
+            this.identifierConfidence = identifierConfidence;
         }
 
         //<editor-fold defaultstate="collapsed" desc="Property implementations: evidenceConfidence, confidence, identifier">
@@ -808,7 +1201,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          * @return the value of evidenceConfidence
          */
         public Confidence getEvidenceConfidence() {
-            return evidenceConfidence;
+            return this.identifier.getConfidence();
         }
 
         /**
@@ -817,7 +1210,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          * @param evidenceConfidence new value of evidenceConfidence
          */
         public void setEvidenceConfidence(Confidence evidenceConfidence) {
-            this.evidenceConfidence = evidenceConfidence;
+            this.identifier.setConfidence(evidenceConfidence);
         }
 
         /**
@@ -825,8 +1218,8 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          *
          * @return the value of confidence
          */
-        public IdentifierConfidence getConfidence() {
-            return confidence;
+        public IdentifierConfidence getIdentifierConfidence() {
+            return identifierConfidence;
         }
 
         /**
@@ -834,8 +1227,8 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          *
          * @param confidence new value of confidence
          */
-        public void setConfidence(IdentifierConfidence confidence) {
-            this.confidence = confidence;
+        public void setIdentifierConfidence(IdentifierConfidence confidence) {
+            this.identifierConfidence = confidence;
         }
 
         /**
@@ -843,7 +1236,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          *
          * @return the value of identifier
          */
-        public Identifier getIdentifier() {
+        public CpeIdentifier getIdentifier() {
             return identifier;
         }
 
@@ -852,7 +1245,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          *
          * @param identifier new value of identifier
          */
-        public void setIdentifier(Identifier identifier) {
+        public void setIdentifier(CpeIdentifier identifier) {
             this.identifier = identifier;
         }
         //</editor-fold>
@@ -865,8 +1258,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          */
         @Override
         public String toString() {
-            return "IdentifierMatch{" + "evidenceConfidence=" + evidenceConfidence
-                    + ", confidence=" + confidence + ", identifier=" + identifier + '}';
+            return "IdentifierMatch{ IdentifierConfidence=" + identifierConfidence + ", identifier=" + identifier + '}';
         }
 
         /**
@@ -876,11 +1268,10 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          */
         @Override
         public int hashCode() {
-            int hash = 5;
-            hash = 97 * hash + (this.evidenceConfidence != null ? this.evidenceConfidence.hashCode() : 0);
-            hash = 97 * hash + (this.confidence != null ? this.confidence.hashCode() : 0);
-            hash = 97 * hash + (this.identifier != null ? this.identifier.hashCode() : 0);
-            return hash;
+            return new HashCodeBuilder(115, 303)
+                    .append(identifierConfidence)
+                    .append(identifier)
+                    .toHashCode();
         }
 
         /**
@@ -891,20 +1282,17 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          */
         @Override
         public boolean equals(Object obj) {
-            if (obj == null) {
+            if (obj == null || !(obj instanceof IdentifierMatch)) {
                 return false;
             }
-            if (getClass() != obj.getClass()) {
-                return false;
+            if (this == obj) {
+                return true;
             }
             final IdentifierMatch other = (IdentifierMatch) obj;
-            if (this.evidenceConfidence != other.evidenceConfidence) {
-                return false;
-            }
-            if (this.confidence != other.confidence) {
-                return false;
-            }
-            return !(this.identifier != other.identifier && (this.identifier == null || !this.identifier.equals(other.identifier)));
+            return new EqualsBuilder()
+                    .append(identifierConfidence, other.identifierConfidence)
+                    .append(identifier, other.identifier)
+                    .build();
         }
         //</editor-fold>
 
@@ -916,10 +1304,9 @@ public class CPEAnalyzer extends AbstractAnalyzer {
          * @return the natural ordering of IdentifierMatch
          */
         @Override
-        public int compareTo(IdentifierMatch o) {
+        public int compareTo(@NotNull IdentifierMatch o) {
             return new CompareToBuilder()
-                    .append(confidence, o.confidence)
-                    .append(evidenceConfidence, o.evidenceConfidence)
+                    .append(identifierConfidence, o.identifierConfidence)
                     .append(identifier, o.identifier)
                     .toComparison();
         }
@@ -930,6 +1317,7 @@ public class CPEAnalyzer extends AbstractAnalyzer {
      *
      * @param args not used
      */
+    @SuppressWarnings("InfiniteLoopStatement")
     public static void main(String[] args) {
         final Settings props = new Settings();
         try (Engine en = new Engine(Engine.Mode.EVIDENCE_PROCESSING, props)) {
@@ -941,17 +1329,35 @@ public class CPEAnalyzer extends AbstractAnalyzer {
             System.out.println("Memory index query for ODC");
             try (BufferedReader br = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8))) {
                 while (true) {
+
+                    final Map<String, MutableInt> vendor = new HashMap<>();
+                    final Map<String, MutableInt> product = new HashMap<>();
                     System.out.print("Vendor: ");
-                    final String vendor = br.readLine();
+                    String[] parts = br.readLine().split(" ");
+                    for (String term : parts) {
+                        final MutableInt count = vendor.get(term);
+                        if (count == null) {
+                            vendor.put(term, new MutableInt(0));
+                        } else {
+                            count.add(1);
+                        }
+                    }
                     System.out.print("Product: ");
-                    final String product = br.readLine();
-                    final List<IndexEntry> list = analyzer.searchCPE(vendor, product, null, null);
+                    parts = br.readLine().split(" ");
+                    for (String term : parts) {
+                        final MutableInt count = product.get(term);
+                        if (count == null) {
+                            product.put(term, new MutableInt(0));
+                        } else {
+                            count.add(1);
+                        }
+                    }
+                    final List<IndexEntry> list = analyzer.searchCPE(vendor, product, new HashSet<>(), new HashSet<>(), "default");
                     if (list == null || list.isEmpty()) {
                         System.out.println("No results found");
                     } else {
-                        for (IndexEntry e : list) {
-                            System.out.println(String.format("%s:%s (%f)", e.getVendor(), e.getProduct(), e.getSearchScore()));
-                        }
+                        list.forEach((e) -> System.out.printf("%s:%s (%f)%n", e.getVendor(), e.getProduct(),
+                                e.getSearchScore()));
                     }
                     System.out.println();
                     System.out.println();
@@ -961,5 +1367,50 @@ public class CPEAnalyzer extends AbstractAnalyzer {
             System.err.println("Lucene ODC search tool failed:");
             System.err.println(ex.getMessage());
         }
+    }
+
+    /**
+     * Sets the reference to the CveDB.
+     *
+     * @param cveDb the CveDB
+     */
+    protected void setCveDB(CveDB cveDb) {
+        this.cve = cveDb;
+    }
+
+    /**
+     * returns a reference to the CveDB.
+     *
+     * @return a reference to the CveDB
+     */
+    protected CveDB getCveDB() {
+        return this.cve;
+    }
+
+    /**
+     * Sets the MemoryIndex.
+     *
+     * @param idx the memory index
+     */
+    protected void setMemoryIndex(MemoryIndex idx) {
+        cpe = idx;
+    }
+
+    /**
+     * Returns the memory index.
+     *
+     * @return the memory index
+     */
+    protected MemoryIndex getMemoryIndex() {
+        return cpe;
+    }
+
+    /**
+     * Sets the CPE Suppression Analyzer.
+     *
+     * @param suppression the CPE Suppression Analyzer
+     */
+    protected void setCpeSuppressionAnalyzer(CpeSuppressionAnalyzer suppression) {
+        this.suppression = suppression;
     }
 }

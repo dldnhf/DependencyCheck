@@ -17,7 +17,6 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import org.apache.commons.io.FileUtils;
 import org.owasp.dependencycheck.Engine;
 import org.owasp.dependencycheck.analyzer.exception.AnalysisException;
 import org.owasp.dependencycheck.data.artifactory.ArtifactorySearch;
@@ -30,8 +29,11 @@ import org.owasp.dependencycheck.exception.InitializationException;
 import org.owasp.dependencycheck.utils.DownloadFailedException;
 import org.owasp.dependencycheck.utils.Downloader;
 import org.owasp.dependencycheck.utils.FileFilterBuilder;
+import org.owasp.dependencycheck.utils.FileUtils;
 import org.owasp.dependencycheck.utils.InvalidSettingException;
+import org.owasp.dependencycheck.utils.ResourceNotFoundException;
 import org.owasp.dependencycheck.utils.Settings;
+import org.owasp.dependencycheck.utils.TooManyRequestsException;
 import org.owasp.dependencycheck.xml.pom.PomUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -103,12 +105,7 @@ public class ArtifactoryAnalyzer extends AbstractFileTypeAnalyzer {
      */
     @Override
     public boolean supportsParallelProcessing() {
-        try {
-            return getSettings().getBoolean(Settings.KEYS.ANALYZER_ARTIFACTORY_PARALLEL_ANALYSIS, true);
-        } catch (InvalidSettingException ex) {
-            LOGGER.debug("Invalid setting for analyzer.artifactory.parallel.analysis; using true.");
-        }
-        return true;
+        return getSettings().getBoolean(Settings.KEYS.ANALYZER_ARTIFACTORY_PARALLEL_ANALYSIS, true);
     }
 
     /**
@@ -130,6 +127,8 @@ public class ArtifactoryAnalyzer extends AbstractFileTypeAnalyzer {
      * Initializes the analyzer once before any analysis is performed.
      *
      * @param engine a reference to the dependency-check engine
+     * @throws InitializationException thrown when the analyzer is unable to
+     * connect to Artifactory
      */
     @Override
     public void prepareFileTypeAnalyzer(Engine engine) throws InitializationException {
@@ -234,15 +233,25 @@ public class ArtifactoryAnalyzer extends AbstractFileTypeAnalyzer {
             pomFile = File.createTempFile("pom", ".xml", baseDir);
             Files.delete(pomFile.toPath());
             LOGGER.debug("Downloading {}", ma.getPomUrl());
+            //TODO add caching
             final Downloader downloader = new Downloader(getSettings());
-            downloader.fetchFile(new URL(ma.getPomUrl()), pomFile);
+            downloader.fetchFile(new URL(ma.getPomUrl()), pomFile,
+                    Settings.KEYS.ANALYZER_ARTIFACTORY_API_USERNAME,
+                    Settings.KEYS.ANALYZER_ARTIFACTORY_API_TOKEN);
             PomUtils.analyzePOM(dependency, pomFile);
 
         } catch (DownloadFailedException ex) {
             LOGGER.warn("Unable to download pom.xml for {} from Artifactory; "
                     + "this could result in undetected CPE/CVEs.", dependency.getFileName());
+        } catch (TooManyRequestsException ex) {
+            this.setEnabled(false);
+            throw new AnalysisException("Received a 429 - too many requests from Artifactory; "
+                    + "the artifactory analyzer is being disabled.", ex);
+        } catch (ResourceNotFoundException ex) {
+            LOGGER.warn("pom.xml not found for {} from Artifactory; "
+                    + "this could result in undetected CPE/CVEs.", dependency.getFileName());
         } finally {
-            if (pomFile != null && pomFile.exists() && !FileUtils.deleteQuietly(pomFile)) {
+            if (pomFile != null && pomFile.exists() && !FileUtils.delete(pomFile)) {
                 LOGGER.debug("Failed to delete temporary pom file {}", pomFile);
                 pomFile.deleteOnExit();
             }

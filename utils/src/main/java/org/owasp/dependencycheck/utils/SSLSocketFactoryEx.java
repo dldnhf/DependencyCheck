@@ -1,31 +1,43 @@
 package org.owasp.dependencycheck.utils;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.security.UnrecoverableKeyException;
+import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import org.apache.commons.lang3.StringUtils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * TODO - is this class needed anymore as we do not support Java 6 and 7.
+ *
  * This class is used to enable additional ciphers used by the SSL Socket. This
  * is specifically because the NVD stopped supporting TLS 1.0 and Java 6 and 7
  * clients by default were unable to connect to download the NVD data feeds.
- *
+ * <p>
  * The following code was copied from
  * http://stackoverflow.com/questions/1037590/which-cipher-suites-to-enable-for-ssl-socket/23365536#23365536
  *
  * @author <a href="http://stackoverflow.com/users/608639/jww">jww</a>
+ * @version $Id: $Id
  */
 public class SSLSocketFactoryEx extends SSLSocketFactory {
 
@@ -56,13 +68,17 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
      * Constructs a new SSLSocketFactory.
      *
      * @param settings reference to the configured settings
-     * @throws NoSuchAlgorithmException thrown when an algorithm is not
-     * supported
-     * @throws KeyManagementException thrown if initialization fails
+     * @throws java.security.NoSuchAlgorithmException thrown when an algorithm
+     * is not supported
+     * @throws java.security.KeyManagementException thrown if initialization
+     * fails
      */
     public SSLSocketFactoryEx(Settings settings) throws NoSuchAlgorithmException, KeyManagementException {
         this.settings = settings;
-        initSSLSocketFactoryEx(null, null, null);
+        final KeyManager[] km = getKeyManagers();
+        final TrustManager[] tm = getTrustManagers();
+
+        initSSLSocketFactoryEx(km, tm, null);
     }
 
     /**
@@ -72,9 +88,10 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
      * @param tm the trust manager
      * @param random secure random
      * @param settings reference to the configured settings
-     * @throws NoSuchAlgorithmException thrown when an algorithm is not
-     * supported
-     * @throws KeyManagementException thrown if initialization fails
+     * @throws java.security.NoSuchAlgorithmException thrown when an algorithm
+     * is not supported
+     * @throws java.security.KeyManagementException thrown if initialization
+     * fails
      */
     public SSLSocketFactoryEx(KeyManager[] km, TrustManager[] tm, SecureRandom random, Settings settings)
             throws NoSuchAlgorithmException, KeyManagementException {
@@ -87,9 +104,10 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
      *
      * @param ctx the SSL context
      * @param settings reference to the configured settings
-     * @throws NoSuchAlgorithmException thrown when an algorithm is not
-     * supported
-     * @throws KeyManagementException thrown if initialization fails
+     * @throws java.security.NoSuchAlgorithmException thrown when an algorithm
+     * is not supported
+     * @throws java.security.KeyManagementException thrown if initialization
+     * fails
      */
     public SSLSocketFactoryEx(SSLContext ctx, Settings settings) throws NoSuchAlgorithmException, KeyManagementException {
         this.settings = settings;
@@ -97,9 +115,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Returns the default cipher suites.
-     *
-     * @return the default cipher suites
      */
     @Override
     public String[] getDefaultCipherSuites() {
@@ -107,9 +125,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Returns the supported cipher suites.
-     *
-     * @return the supported cipher suites
      */
     @Override
     public String[] getSupportedCipherSuites() {
@@ -135,14 +153,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Creates an SSL Socket.
-     *
-     * @param s the base socket
-     * @param host the host
-     * @param port the port
-     * @param autoClose if the socket should auto-close
-     * @return the SSL Socket
-     * @throws IOException thrown if the creation fails
      */
     @Override
     public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws IOException {
@@ -155,14 +168,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Creates a new SSL Socket.
-     *
-     * @param address the address to connect to
-     * @param port the port number
-     * @param localAddress the local address
-     * @param localPort the local port
-     * @return the SSL Socket
-     * @throws IOException thrown if the creation fails
      */
     @Override
     public Socket createSocket(InetAddress address, int port, InetAddress localAddress, int localPort) throws IOException {
@@ -175,14 +183,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Creates a new SSL Socket.
-     *
-     * @param host the host to connect to
-     * @param port the port to connect to
-     * @param localHost the local host
-     * @param localPort the local port
-     * @return the SSL Socket
-     * @throws IOException thrown if the creation fails
      */
     @Override
     public Socket createSocket(String host, int port, InetAddress localHost, int localPort) throws IOException {
@@ -195,12 +198,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Creates a new SSL Socket.
-     *
-     * @param host the host to connect to
-     * @param port the port to connect to
-     * @return the SSL Socket
-     * @throws IOException thrown if the creation fails
      */
     @Override
     public Socket createSocket(InetAddress host, int port) throws IOException {
@@ -213,12 +213,9 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
     }
 
     /**
+     * {@inheritDoc}
+     * <p>
      * Creates a new SSL Socket.
-     *
-     * @param host the host to connect to
-     * @param port the port to connect to
-     * @return the SSL Socket
-     * @throws IOException thrown if the creation fails
      */
     @Override
     public Socket createSocket(String host, int port) throws IOException {
@@ -267,9 +264,10 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
      *
      * @return the protocol list
      */
+    @SuppressWarnings("StringSplitter")
     protected String[] getProtocolList() {
         SSLSocket socket = null;
-        String[] availableProtocols = null;
+        final String[] availableProtocols;
         final String[] preferredProtocols = settings.getString(
                 Settings.KEYS.DOWNLOADER_TLS_PROTOCOL_LIST,
                 "TLSv1.1,TLSv1.2,TLSv1.3")
@@ -309,5 +307,45 @@ public class SSLSocketFactoryEx extends SSLSocketFactory {
         }
 
         return aa.toArray(new String[0]);
+    }
+
+    private KeyManager[] getKeyManagers() {
+        KeyManager[] km = null;
+        final String ksPath = System.getProperty("javax.net.ssl.keyStore");
+        final String ksType = System.getProperty("javax.net.ssl.keyStoreType");
+        final String ksPass = System.getProperty("javax.net.ssl.keyStorePassword");
+
+        if (!StringUtils.isAnyEmpty(ksPath, ksType, ksPass)) {
+            try (FileInputStream fis = new FileInputStream(ksPath)) {
+                final KeyStore ks = KeyStore.getInstance(ksType);
+                ks.load(fis, ksPass.toCharArray());
+                final KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
+                kmf.init(ks, ksPass.toCharArray());
+                km = kmf.getKeyManagers();
+            } catch (KeyStoreException | IOException | CertificateException | UnrecoverableKeyException | NoSuchAlgorithmException ex) {
+                throw new RuntimeException(ex);
+            }
+        }
+        return km;
+    }
+
+    private TrustManager[] getTrustManagers() {
+        TrustManager[] tm = null;
+        final String ksType = System.getProperty("javax.net.ssl.keyStoreType");
+        final String tsPath = System.getProperty("javax.net.ssl.trustStore");
+        final String tsPass = System.getProperty("javax.net.ssl.trustStorePassword");
+
+        if (!StringUtils.isAnyEmpty(tsPath, ksType, tsPass)) {
+            try (FileInputStream fis = new FileInputStream(tsPath)) {
+                final KeyStore ts = KeyStore.getInstance(ksType);
+                ts.load(fis, tsPass.toCharArray());
+                final TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
+                tmf.init(ts);
+                tm = tmf.getTrustManagers();
+            } catch (KeyStoreException | IOException | CertificateException | NoSuchAlgorithmException ex) {
+                throw new RuntimeException(ex);
+            }
+        }
+        return tm;
     }
 }

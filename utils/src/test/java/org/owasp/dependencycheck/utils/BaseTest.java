@@ -25,7 +25,7 @@ import org.junit.Before;
  *
  * @author Jeremy Long
  */
-public class BaseTest {
+public abstract class BaseTest {
 
     /**
      * The configured settings.
@@ -57,7 +57,7 @@ public class BaseTest {
         return settings;
     }
     
-        /**
+    /**
      * Returns the given resource as a File using the object's class loader. The
      * org.junit.Assume API is used so that test cases are skipped if the
      * resource is not available.

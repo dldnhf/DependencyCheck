@@ -17,17 +17,19 @@
  */
 package org.owasp.dependencycheck.analyzer;
 
-import com.vdurmont.semver4j.Semver;
-import com.vdurmont.semver4j.Semver.SemverType;
-import com.vdurmont.semver4j.SemverException;
+import com.github.packageurl.MalformedPackageURLException;
+import org.semver4j.Semver;
+import org.semver4j.SemverException;
 import java.io.File;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import static java.util.stream.Collectors.toSet;
 import javax.annotation.concurrent.ThreadSafe;
 import org.owasp.dependencycheck.dependency.Dependency;
-import org.owasp.dependencycheck.dependency.Identifier;
 import org.owasp.dependencycheck.dependency.Vulnerability;
+import org.owasp.dependencycheck.dependency.naming.Identifier;
+import org.owasp.dependencycheck.dependency.naming.PurlIdentifier;
 import org.owasp.dependencycheck.utils.DependencyVersion;
 import org.owasp.dependencycheck.utils.DependencyVersionUtil;
 import org.owasp.dependencycheck.utils.Settings;
@@ -129,6 +131,15 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
                 mergeDependencies(dependency, nextDependency, dependenciesToRemove);
                 dependency.removeRelatedDependencies(nextDependency);
             }
+        } else if (isWebJar(dependency, nextDependency)) {
+            if (dependency.getFileName().toLowerCase().endsWith(".js")) {
+                mergeDependencies(nextDependency, dependency, dependenciesToRemove, true);
+                nextDependency.removeRelatedDependencies(dependency);
+                return true;
+            } else {
+                mergeDependencies(dependency, nextDependency, dependenciesToRemove, true);
+                dependency.removeRelatedDependencies(nextDependency);
+            }
         } else if (cpeIdentifiersMatch(dependency, nextDependency)
                 && hasSameBasePath(dependency, nextDependency)
                 && vulnerabilitiesMatch(dependency, nextDependency)
@@ -139,7 +150,7 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
                 mergeDependencies(nextDependency, dependency, dependenciesToRemove);
                 return true; //since we merged into the next dependency - skip forward to the next in mainIterator
             }
-        } else if (ecoSystemIs(AbstractNpmAnalyzer.NPM_DEPENDENCY_ECOSYSTEM, dependency, nextDependency)
+        } else if (ecosystemIs(AbstractNpmAnalyzer.NPM_DEPENDENCY_ECOSYSTEM, dependency, nextDependency)
                 && namesAreEqual(dependency, nextDependency)
                 && npmVersionsMatch(dependency.getVersion(), nextDependency.getVersion())) {
 
@@ -165,15 +176,42 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
      */
     public static void mergeDependencies(final Dependency dependency,
             final Dependency relatedDependency, final Set<Dependency> dependenciesToRemove) {
+        mergeDependencies(dependency, relatedDependency, dependenciesToRemove, false);
+    }
+
+    /**
+     * Adds the relatedDependency to the dependency's related dependencies.
+     *
+     * @param dependency the main dependency
+     * @param relatedDependency a collection of dependencies to be removed from
+     * the main analysis loop, this is the source of dependencies to remove
+     * @param dependenciesToRemove a collection of dependencies that will be
+     * removed from the main analysis loop, this function adds to this
+     * collection
+     * @param copyVulnsAndIds whether or not identifiers and vulnerabilities are
+     * copied
+     */
+    public static void mergeDependencies(final Dependency dependency,
+            final Dependency relatedDependency, final Set<Dependency> dependenciesToRemove,
+            final boolean copyVulnsAndIds) {
         dependency.addRelatedDependency(relatedDependency);
-        for (Dependency d : relatedDependency.getRelatedDependencies()) {
-            dependency.addRelatedDependency(d);
-            relatedDependency.removeRelatedDependencies(d);
+        relatedDependency.getRelatedDependencies()
+                .forEach(dependency::addRelatedDependency);
+        relatedDependency.clearRelatedDependencies();
+
+        if (copyVulnsAndIds) {
+            relatedDependency.getSoftwareIdentifiers()
+                    .forEach(dependency::addSoftwareIdentifier);
+            relatedDependency.getVulnerableSoftwareIdentifiers()
+                    .forEach(dependency::addVulnerableSoftwareIdentifier);
+            relatedDependency.getVulnerabilities()
+                    .forEach(dependency::addVulnerability);
         }
         //TODO this null check was added for #1296 - but I believe this to be related to virtual dependencies
         //  we may want to merge project references on virtual dependencies...
         if (dependency.getSha1sum() != null && dependency.getSha1sum().equals(relatedDependency.getSha1sum())) {
             dependency.addAllProjectReferences(relatedDependency.getProjectReferences());
+            dependency.addAllIncludedBy(relatedDependency.getIncludedBy());
         }
         if (dependenciesToRemove != null) {
             dependenciesToRemove.add(relatedDependency);
@@ -185,26 +223,19 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
      * [drive]\[repo_location]\repository\[path1]\[path2].
      *
      * @param path the path to trim
+     * @param repo the name of the local maven repository
      * @return a string representing the base path.
      */
-    private String getBaseRepoPath(final String path) {
-        int pos;
-        if (path.contains("local-repo")) {
-            pos = path.indexOf("local-repo" + File.separator) + 11;
-        } else {
-            pos = path.indexOf("repository" + File.separator) + 11;
-        }
-        if (pos < 0) {
+    private String getBaseRepoPath(final String path, final String repo) {
+        int pos = path.indexOf(repo + File.separator) + repo.length() + 1;
+        if (pos < repo.length() + 1) {
             return path;
         }
         int tmp = path.indexOf(File.separator, pos);
         if (tmp <= 0) {
             return path;
         }
-        //below is always true
-        //if (tmp > 0) {
         pos = tmp + 1;
-        //}
         tmp = path.indexOf(File.separator, pos);
         if (tmp > 0) {
             pos = tmp + 1;
@@ -256,34 +287,22 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
      * equal
      */
     private boolean cpeIdentifiersMatch(Dependency dependency1, Dependency dependency2) {
-        if (dependency1 == null || dependency1.getIdentifiers() == null
-                || dependency2 == null || dependency2.getIdentifiers() == null) {
+        if (dependency1 == null || dependency1.getVulnerableSoftwareIdentifiers() == null
+                || dependency2 == null || dependency2.getVulnerableSoftwareIdentifiers() == null) {
             return false;
         }
         boolean matches = false;
-        int cpeCount1 = 0;
-        int cpeCount2 = 0;
-        for (Identifier i : dependency1.getIdentifiers()) {
-            if ("cpe".equals(i.getType())) {
-                cpeCount1 += 1;
-            }
-        }
-        for (Identifier i : dependency2.getIdentifiers()) {
-            if ("cpe".equals(i.getType())) {
-                cpeCount2 += 1;
-            }
-        }
+        final int cpeCount1 = dependency1.getVulnerableSoftwareIdentifiers().size();
+        final int cpeCount2 = dependency2.getVulnerableSoftwareIdentifiers().size();
         if (cpeCount1 > 0 && cpeCount1 == cpeCount2) {
-            for (Identifier i : dependency1.getIdentifiers()) {
-                if ("cpe".equals(i.getType())) {
-                    matches |= dependency2.getIdentifiers().contains(i);
-                    if (!matches) {
-                        break;
-                    }
+            for (Identifier i : dependency1.getVulnerableSoftwareIdentifiers()) {
+                matches |= dependency2.getVulnerableSoftwareIdentifiers().contains(i);
+                if (!matches) {
+                    break;
                 }
             }
         }
-        LOGGER.debug("IdentifiersMatch={} ({}, {})", matches, dependency1.getFileName(), dependency2.getFileName());
+        LOGGER.trace("IdentifiersMatch={} ({}, {})", matches, dependency1.getFileName(), dependency2.getFileName());
         return matches;
     }
 
@@ -325,11 +344,22 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
         if (left.equalsIgnoreCase(right)) {
             return true;
         }
-
-        if (left.matches(".*[/\\\\](repository|local-repo)[/\\\\].*") && right.matches(".*[/\\\\](repository|local-repo)[/\\\\].*")) {
-            left = getBaseRepoPath(left);
-            right = getBaseRepoPath(right);
+        final String localRepo = getSettings().getString(Settings.KEYS.MAVEN_LOCAL_REPO);
+        final Pattern p;
+        if (localRepo == null) {
+            p = Pattern.compile(".*[/\\\\](?<repo>repository|local-repo)[/\\\\].*");
+        } else {
+            final File f = new File(localRepo);
+            final String dir = f.getName();
+            p = Pattern.compile(".*[/\\\\](?<repo>repository|local-repo|" + Pattern.quote(dir) + ")[/\\\\].*");
         }
+        final Matcher mleft = p.matcher(left);
+        final Matcher mright = p.matcher(right);
+        if (mleft.find() && mright.find()) {
+            left = getBaseRepoPath(left, mleft.group("repo"));
+            right = getBaseRepoPath(right, mright.group("repo"));
+        }
+
         if (left.equalsIgnoreCase(right)) {
             return true;
         }
@@ -362,17 +392,23 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
             returnVal = true;
         } else if (!left.isVirtual() && right.isVirtual()) {
             returnVal = false;
-        } else if (!rightName.matches(".*\\.(tar|tgz|gz|zip|ear|war).+") && leftName.matches(".*\\.(tar|tgz|gz|zip|ear|war).+")
-                || rightName.contains("core") && !leftName.contains("core")
-                || rightName.contains("kernel") && !leftName.contains("kernel")
-                || rightName.contains("akka-stream") && !leftName.contains("akka-stream")
-                || rightName.contains("netty-transport") && !leftName.contains("netty-transport")) {
+        } else if ((!rightName.matches(".*\\.(tar|tgz|gz|zip|ear|war|rpm).+") && leftName.matches(".*\\.(tar|tgz|gz|zip|ear|war|rpm).+"))
+                || (rightName.contains("core") && !leftName.contains("core"))
+                || (rightName.contains("kernel") && !leftName.contains("kernel"))
+                || (rightName.contains("server") && !leftName.contains("server"))
+                || (rightName.contains("project") && !leftName.contains("project"))
+                || (rightName.contains("engine") && !leftName.contains("engine"))
+                || (rightName.contains("akka-stream") && !leftName.contains("akka-stream"))
+                || (rightName.contains("netty-transport") && !leftName.contains("netty-transport"))) {
             returnVal = false;
-        } else if (rightName.matches(".*\\.(tar|tgz|gz|zip|ear|war).+") && !leftName.matches(".*\\.(tar|tgz|gz|zip|ear|war).+")
-                || !rightName.contains("core") && leftName.contains("core")
-                || !rightName.contains("kernel") && leftName.contains("kernel")
-                || !rightName.contains("akka-stream") && leftName.contains("akka-stream")
-                || !rightName.contains("netty-transport") && leftName.contains("netty-transport")) {
+        } else if ((rightName.matches(".*\\.(tar|tgz|gz|zip|ear|war|rpm).+") && !leftName.matches(".*\\.(tar|tgz|gz|zip|ear|war|rpm).+"))
+                || (!rightName.contains("core") && leftName.contains("core"))
+                || (!rightName.contains("kernel") && leftName.contains("kernel"))
+                || (!rightName.contains("server") && leftName.contains("server"))
+                || (!rightName.contains("project") && leftName.contains("project"))
+                || (!rightName.contains("engine") && leftName.contains("engine"))
+                || (!rightName.contains("akka-stream") && leftName.contains("akka-stream"))
+                || (!rightName.contains("netty-transport") && leftName.contains("netty-transport"))) {
             returnVal = true;
         } else {
             /*
@@ -407,6 +443,57 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
     }
 
     /**
+     * Determines if a JS file is from a webjar dependency.
+     *
+     * @param dependency the first dependency to compare
+     * @param nextDependency the second dependency to compare
+     * @return <code>true</code> if the dependency is a web jar and the next
+     * dependency is a JS file from the web jar; otherwise <code>false</code>
+     */
+    protected boolean isWebJar(Dependency dependency, Dependency nextDependency) {
+        if (dependency == null || dependency.getFileName() == null
+                || nextDependency == null || nextDependency.getFileName() == null
+                || dependency.getSoftwareIdentifiers().isEmpty()
+                || nextDependency.getSoftwareIdentifiers().isEmpty()) {
+            return false;
+        }
+        final String mainName = dependency.getFileName().toLowerCase();
+        final String nextName = nextDependency.getFileName().toLowerCase();
+        if (mainName.endsWith(".jar") && nextName.endsWith(".js") && nextName.startsWith(mainName)) {
+            return dependency.getSoftwareIdentifiers()
+                    .stream().map(Identifier::getValue).collect(toSet())
+                    .containsAll(nextDependency.getSoftwareIdentifiers().stream().map(this::identifierToWebJarForComparison).collect(toSet()));
+        } else if (nextName.endsWith(".jar") && mainName.endsWith("js") && mainName.startsWith(nextName)) {
+            return nextDependency.getSoftwareIdentifiers()
+                    .stream().map(Identifier::getValue).collect(toSet())
+                    .containsAll(dependency.getSoftwareIdentifiers().stream().map(this::identifierToWebJarForComparison).collect(toSet()));
+        }
+        return false;
+    }
+
+    /**
+     * Attempts to convert a given JavaScript identifier to a web jar CPE.
+     *
+     * @param id a JavaScript CPE
+     * @return a Maven CPE for a web jar if conversion is possible; otherwise
+     * the original CPE is returned
+     */
+    private String identifierToWebJarForComparison(Identifier id) {
+        if (id instanceof PurlIdentifier) {
+            final PurlIdentifier pid = (PurlIdentifier) id;
+            try {
+                final Identifier nid = new PurlIdentifier("maven", "org.webjars", pid.getName(), pid.getVersion(), pid.getConfidence());
+                return nid.getValue();
+            } catch (MalformedPackageURLException ex) {
+                LOGGER.debug("Unable to build webjar purl id", ex);
+                return id.getValue();
+            }
+        } else {
+            return id == null ? "" : id.getValue();
+        }
+    }
+
+    /**
      * Determines if the jar is shaded and the created pom.xml identified the
      * same CPE as the jar - if so, the pom.xml dependency should be removed.
      *
@@ -418,16 +505,16 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
     protected boolean isShadedJar(Dependency dependency, Dependency nextDependency) {
         if (dependency == null || dependency.getFileName() == null
                 || nextDependency == null || nextDependency.getFileName() == null
-                || dependency.getIdentifiers().isEmpty()
-                || nextDependency.getIdentifiers().isEmpty()) {
+                || dependency.getSoftwareIdentifiers().isEmpty()
+                || nextDependency.getSoftwareIdentifiers().isEmpty()) {
             return false;
         }
         final String mainName = dependency.getFileName().toLowerCase();
         final String nextName = nextDependency.getFileName().toLowerCase();
         if (mainName.endsWith(".jar") && nextName.endsWith("pom.xml")) {
-            return dependency.getIdentifiers().containsAll(nextDependency.getIdentifiers());
+            return dependency.getSoftwareIdentifiers().containsAll(nextDependency.getSoftwareIdentifiers());
         } else if (nextName.endsWith(".jar") && mainName.endsWith("pom.xml")) {
-            return nextDependency.getIdentifiers().containsAll(dependency.getIdentifiers());
+            return nextDependency.getSoftwareIdentifiers().containsAll(dependency.getSoftwareIdentifiers());
         }
         return false;
     }
@@ -441,8 +528,8 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
      * @return <code>true</code> if the leftPath is the shortest; otherwise
      * <code>false</code>
      */
-    protected boolean firstPathIsShortest(String left, String right) {
-        if (left.contains("dctemp")) {
+    public static boolean firstPathIsShortest(String left, String right) {
+        if (left.contains("dctemp") && !right.contains("dctemp")) {
             return false;
         }
         final String leftPath = left.replace('\\', '/');
@@ -464,7 +551,7 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
      * @param c the character to count
      * @return the number of times the character is present in the string
      */
-    private int countChar(String string, char c) {
+    private static int countChar(String string, char c) {
         int count = 0;
         final int max = string.length();
         for (int i = 0; i < max; i++) {
@@ -494,7 +581,7 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
      * @return true if the ecosystem is equal in both dependencies; otherwise
      * false
      */
-    private boolean ecoSystemIs(String ecoSystem, Dependency dependency, Dependency nextDependency) {
+    private boolean ecosystemIs(String ecoSystem, Dependency dependency, Dependency nextDependency) {
         return ecoSystem.equals(dependency.getEcosystem()) && ecoSystem.equals(nextDependency.getEcosystem());
     }
 
@@ -538,7 +625,7 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
                 }
             }
             try {
-                final Semver v = new Semver(right, SemverType.NPM);
+                final Semver v = new Semver(right);
                 return v.satisfies(left);
             } catch (SemverException ex) {
                 LOGGER.trace("ignore", ex);
@@ -551,7 +638,7 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
                 }
             }
             try {
-                Semver v = new Semver(left, SemverType.NPM);
+                Semver v = new Semver(left);
                 if (!right.isEmpty() && v.satisfies(right)) {
                     return true;
                 }
@@ -559,7 +646,7 @@ public class DependencyBundlingAnalyzer extends AbstractDependencyComparingAnaly
                     left = current;
                     right = stripLeadingNonNumeric(right);
                     if (right != null) {
-                        v = new Semver(right, SemverType.NPM);
+                        v = new Semver(right);
                         return v.satisfies(left);
                     }
                 }

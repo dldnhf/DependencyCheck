@@ -71,9 +71,33 @@ public class PomHandler extends DefaultHandler {
     /**
      * The license element.
      */
-    public static final String LICENSE = "license";
+    public static final String LICENSE_NODE = "license";
     /**
-     * The url element.
+     * The developers element.
+     */
+    public static final String DEVELOPERS = "developers";
+    /**
+     * The developer element.
+     */
+    public static final String DEVELOPER_NODE = "developer";
+    /**
+     * The developer id element.
+     */
+    public static final String DEVELOPER_ID = "id";
+    /**
+     * The developer email element.
+     */
+    public static final String DEVELOPER_EMAIL = "email";
+    /**
+     * The developer organization element.
+     */
+    public static final String DEVELOPER_ORGANIZATION = "organization";
+    /**
+     * The developer organization URL element.
+     */
+    public static final String DEVELOPER_ORGANIZATION_URL = "organizationUrl";
+    /**
+     * The URL element.
      */
     public static final String URL = "url";
     /**
@@ -88,6 +112,10 @@ public class PomHandler extends DefaultHandler {
      * The license object.
      */
     private License license = null;
+    /**
+     * The developer object.
+     */
+    private Developer developer = null;
     /**
      * The current node text being extracted from the element.
      */
@@ -115,8 +143,10 @@ public class PomHandler extends DefaultHandler {
     public void startElement(String uri, String localName, String qName, Attributes attributes) throws SAXException {
         currentText = new StringBuilder();
         stack.push(qName);
-        if (LICENSE.equals(qName)) {
+        if (LICENSE_NODE.equals(qName)) {
             license = new License();
+        } else if (DEVELOPER_NODE.equals(qName)) {
+            developer = new Developer();
         }
     }
 
@@ -144,7 +174,7 @@ public class PomHandler extends DefaultHandler {
                                 model.setArtifactId(currentText.toString());
                                 break;
                             case VERSION:
-                                model.setVersion(currentText.toString());
+                                model.setVersion(currentText.toString().trim());
                                 break;
                             case NAME:
                                 model.setName(currentText.toString());
@@ -184,7 +214,7 @@ public class PomHandler extends DefaultHandler {
                         }
                     }
                     break;
-                case LICENSE:
+                case LICENSE_NODE:
                     if (license != null) {
                         if (NAME.equals(qName)) {
                             license.setName(currentText.toString());
@@ -194,8 +224,38 @@ public class PomHandler extends DefaultHandler {
                     }
                     break;
                 case LICENSES:
-                    if (LICENSE.equals(qName) && license != null) {
+                    if (LICENSE_NODE.equals(qName) && license != null) {
                         model.addLicense(license);
+                        license = null;
+                    }
+                    break;
+                case DEVELOPER_NODE:
+                    if (developer != null && qName != null) {
+                        switch (qName) {
+                            case DEVELOPER_ID:
+                                developer.setId(currentText.toString());
+                                break;
+                            case NAME:
+                                developer.setName(currentText.toString());
+                                break;
+                            case DEVELOPER_EMAIL:
+                                developer.setEmail(currentText.toString());
+                                break;
+                            case DEVELOPER_ORGANIZATION:
+                                developer.setOrganization(currentText.toString());
+                                break;
+                            case DEVELOPER_ORGANIZATION_URL:
+                                developer.setOrganizationUrl(currentText.toString());
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    break;
+                case DEVELOPERS:
+                    if (DEVELOPER_NODE.equals(qName) && developer != null) {
+                        model.addDeveloper(developer);
+                        developer = null;
                     }
                     break;
                 default:
